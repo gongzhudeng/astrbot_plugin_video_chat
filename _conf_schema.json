@@ -1,0 +1,90 @@
+{
+  "caption_provider_id": {
+    "type": "string",
+    "description": "视频转述模型供应商",
+    "hint": "留空则使用当前会话模型。推荐选择支持视频或图片输入的供应商（如 Qwen-VL、Gemini、本地多模态模型等）。",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "caption_prompt": {
+    "type": "text",
+    "description": "转述提示词",
+    "hint": "发给视觉模型的提示词。可在此处加上字数限制（例如：不超过 300 字）来控制输出长度。",
+    "default": "请用不超过 300 字简洁概括这个视频的核心内容，包括主要人物、事件和关键信息。如果画面中有字幕，请以字幕内容为准。不要编造没有出现的信息。"
+  },
+  "allow_local_download": {
+    "type": "bool",
+    "description": "允许临时下载视频",
+    "hint": "关闭时只走 video_url 直传路径，不会在本地保存任何文件。如果你的视觉模型不支持 video_url，需要开启此项才能使用抽帧功能。",
+    "default": false
+  },
+  "download_dir": {
+    "type": "string",
+    "description": "临时下载目录",
+    "hint": "仅在允许临时下载视频开启时生效。留空则使用插件数据目录下的 temp 子目录。支持绝对路径，例如 D:/videos/temp。",
+    "default": ""
+  },
+  "max_video_size_mb": {
+    "type": "int",
+    "description": "最大视频大小限制 (MB)",
+    "hint": "仅在允许临时下载视频开启时生效。超过此大小的视频将跳过下载。",
+    "slider": {
+      "min": 10,
+      "max": 2000,
+      "step": 10
+    },
+    "default": 200
+  },
+  "frames_per_second": {
+    "type": "float",
+    "description": "抽帧速率（帧/秒）",
+    "hint": "每秒抽几帧。实际帧数 = 分析时长 × 此值，超出最大帧数上限时自动降频。默认 1.0 即每秒一帧。",
+    "default": 1.0
+  },
+  "max_frames": {
+    "type": "int",
+    "description": "最大帧数上限",
+    "hint": "单次最多发给模型的帧数，防止长视频产生过多图片。使用本地模型时可适当调高。",
+    "slider": {
+      "min": 1,
+      "max": 120,
+      "step": 1
+    },
+    "default": 30
+  },
+  "analyze_first_seconds": {
+    "type": "int",
+    "description": "只分析前 N 秒",
+    "hint": "只对视频的前 N 秒抽帧分析，0 表示分析全程。默认 120（前 2 分钟），视频通常前段最重要。",
+    "slider": {
+      "min": 0,
+      "max": 3600,
+      "step": 10
+    },
+    "default": 120
+  },
+  "ffmpeg_path": {
+    "type": "string",
+    "description": "ffmpeg 路径",
+    "hint": "可选。留空则从系统 PATH 中查找 ffmpeg。如果已加入 PATH 可不填；否则填写绝对路径，例如 C:/ffmpeg/bin/ffmpeg.exe。",
+    "default": ""
+  },
+  "ytdlp_proxy": {
+    "type": "string",
+    "description": "yt-dlp 代理",
+    "hint": "可选。解析 YouTube 等国外平台时可能需要。格式：http://127.0.0.1:7890 或 socks5://127.0.0.1:7891。",
+    "default": ""
+  },
+  "bilibili_sessdata": {
+    "type": "string",
+    "description": "B站 SESSDATA Cookie",
+    "hint": "可选。填写后，发送 B 站链接时会优先尝试获取视频字幕（需登录态）。留空则跳过字幕路径。\n\n获取方法：\n1. 在电脑浏览器登录 bilibili.com\n2. 按 F12 打开开发者工具\n3. 切换到「应用」(Application) → Cookie → bilibili.com\n4. 找到 SESSDATA 一行，复制「值」列的内容粘贴到此处\n\n注意：只需要 SESSDATA，不需要 bili_jct（后者仅用于写操作）。有效期约数月，失效后需重新获取。",
+    "default": ""
+  },
+  "bili_subtitle_plus_frames": {
+    "type": "bool",
+    "description": "字幕同时抽帧",
+    "hint": "仅在 B站链接有字幕时生效。关闭（默认）= 有字幕就只发字幕文本给模型，省资源；开启 = 字幕文本 + 抽帧图片一起发给模型，画面感更强但消耗更多资源。",
+    "default": false
+  }
+}
