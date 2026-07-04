@@ -69,10 +69,16 @@
     "hint": "可选。留空则从系统 PATH 中查找 ffmpeg。如果已加入 PATH 可不填；否则填写绝对路径，例如 C:/ffmpeg/bin/ffmpeg.exe。",
     "default": ""
   },
+  "ytdlp_cookies_file": {
+    "type": "string",
+    "description": "yt-dlp Cookies 文件路径",
+    "hint": "可选。填写 Netscape 格式的 cookies.txt 文件绝对路径，用于解析需要登录才能访问的视频（如抖音）。\n\n获取方法：\n1. 在浏览器安装「Get cookies.txt LOCALLY」扩展\n2. 登录对应平台（抖音请登录 douyin.com）\n3. 点击扩展图标，导出 cookies.txt\n4. 将文件保存到固定位置（如 D:/cookies/douyin_cookies.txt）\n5. 填写该文件的绝对路径\n\n注意：Cookie 有有效期，失效后需重新导出。",
+    "default": ""
+  },
   "ytdlp_proxy": {
     "type": "string",
     "description": "yt-dlp 代理",
-    "hint": "可选。解析 YouTube 等国外平台时可能需要。格式：http://127.0.0.1:7890 或 socks5://127.0.0.1:7891。",
+    "hint": "可选。格式：http://127.0.0.1:7890 或 socks5://127.0.0.1:7891。",
     "default": ""
   },
   "bilibili_sessdata": {
@@ -86,5 +92,16 @@
     "description": "字幕同时抽帧",
     "hint": "仅在 B站链接有字幕时生效。关闭（默认）= 有字幕就只发字幕文本给模型，省资源；开启 = 字幕文本 + 抽帧图片一起发给模型，画面感更强但消耗更多资源。",
     "default": false
+  },
+  "max_images": {
+    "type": "int",
+    "description": "图文帖最多看几张图",
+    "hint": "抖音图文帖（不含视频）时，最多取前 N 张图发给视觉模型。图片太多会消耗大量 token，建议不超过 9 张。",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "default": 9
   }
 }

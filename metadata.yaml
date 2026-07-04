@@ -1,18 +1,15 @@
 name: astrbot_plugin_video_chat
 display_name: 灵犀 · 视频链接理解
 author: 灵犀
-desc: 发送视频链接，AI 自动理解视频内容，支持抖音、B站（含字幕提取）、YouTube、微博、快手等主流平台
+desc: 发送视频链接，AI 自动理解视频内容，支持抖音（视频/图文）、B站（含字幕提取）
 version: v1.1.0
 repo: https://github.com/gongzhudeng/astrbot_plugin_video_chat
 help: |
   发送包含视频链接的消息，AI 会自动判断是否需要解析视频内容。
 
   支持平台：
-  - 抖音 / TikTok
-  - B 站（BV号/av号/短链/卡片，可配置字幕提取）
-  - YouTube（含短链 youtu.be）
-  - 微博 / 快手 / Twitter/X / Instagram
-  - 以及其他 yt-dlp 支持的平台
+  - 抖音：视频（v.douyin.com 短链 / 完整链接）、图文帖（/share/note/）
+  - B 站：BV号/av号/短链（b23.tv）/完整链接，可配置 SESSDATA 启用字幕提取
 
   工作方式：
   1. 发送包含视频链接的消息（或说"帮我看看这个 xxx"）

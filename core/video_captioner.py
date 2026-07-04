@@ -52,6 +52,115 @@ async def caption_from_url(
     return text
 
 
+def _to_jpeg_bytes(data: bytes) -> bytes | None:
+    """Convert raw image bytes to JPEG using Pillow.
+
+    Returns JPEG bytes, or None if conversion fails (unsupported format).
+    Falls back to returning the original data if it already looks like JPEG/PNG/GIF/WEBP/BMP.
+    """
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(data))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+    except Exception:
+        pass
+
+    # Pillow not available or unsupported — accept only known-safe formats by magic bytes
+    if data[:3] == b"\xff\xd8\xff":
+        return data  # JPEG
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return data  # PNG
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return data  # GIF
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return data  # WEBP
+    if data[:2] == b"BM":
+        return data  # BMP
+    return None  # Skip AVIF/HEIC/unknown
+
+
+async def caption_from_image_urls(
+    image_urls: list[str],
+    *,
+    provider: object,
+    prompt: str = DEFAULT_CAPTION_PROMPT,
+    max_images: int = 9,
+) -> str:
+    """Download image URLs, encode to base64, and ask the vision model to caption them.
+
+    max_images caps how many images are sent (first N).
+    Returns caption text, or raises RuntimeError on failure.
+    """
+    import aiohttp
+
+    selected = image_urls[:max(1, max_images)]
+    image_blocks = []
+
+    # Prefer JPEG/PNG/WEBP — avoids AVIF responses from Douyin/XHS CDNs
+    _img_headers = {
+        "Accept": "image/jpeg,image/png,image/webp,image/gif,image/*;q=0.8",
+        "Referer": "https://www.douyin.com/",
+    }
+
+    async with aiohttp.ClientSession(headers=_img_headers) as session:
+        for img_url in selected:
+            try:
+                async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    raw = await resp.read()
+                # Convert to JPEG (handles AVIF/HEIC/unknown formats via Pillow)
+                converted = _to_jpeg_bytes(raw)
+                if converted is None:
+                    logger.warning("[video-chat] 跳过不支持的图片格式 %s", img_url[:80])
+                    continue
+                # Determine MIME type from converted bytes
+                if converted[:3] == b"\xff\xd8\xff":
+                    mime = "image/jpeg"
+                elif converted[:8] == b"\x89PNG\r\n\x1a\n":
+                    mime = "image/png"
+                elif converted[:6] in (b"GIF87a", b"GIF89a"):
+                    mime = "image/gif"
+                elif converted[:4] == b"RIFF" and converted[8:12] == b"WEBP":
+                    mime = "image/webp"
+                else:
+                    mime = "image/jpeg"
+                payload = base64.b64encode(converted).decode("utf-8")
+                image_blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{payload}"},
+                })
+            except Exception as exc:
+                logger.warning("[video-chat] 图片下载失败 %s：%s", img_url[:80], exc)
+
+    if not image_blocks:
+        raise RuntimeError("所有图片下载均失败，无法进行图片转述")
+
+    contexts = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                *image_blocks,
+            ],
+        }
+    ]
+
+    logger.info("[video-chat] 图文转述：发送 %d/%d 张图片给视觉模型", len(image_blocks), len(image_urls))
+    try:
+        resp = await provider.text_chat(contexts=contexts)
+    except Exception as exc:
+        raise RuntimeError(f"视觉模型调用失败（图片路径）：{exc}") from exc
+
+    text = str(getattr(resp, "completion_text", "") or "").strip()
+    if not text:
+        raise RuntimeError("视觉模型返回了空文本（图片路径）")
+    return text
+
+
 async def caption_from_frames(
     local_path: Path,
     *,

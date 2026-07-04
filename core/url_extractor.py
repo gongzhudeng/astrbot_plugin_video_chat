@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-# Platform URL patterns — ordered from most specific to most generic.
+# Supported platforms: Douyin, Bilibili.
 # Each entry: (platform_name, compiled_regex)
 _PLATFORM_PATTERNS: list[tuple[str, re.Pattern]] = [
     (
@@ -23,63 +23,13 @@ _PLATFORM_PATTERNS: list[tuple[str, re.Pattern]] = [
     (
         "douyin",
         re.compile(
-            r"https?://(?:www\.|m\.)?douyin\.com/(?:video/|share/video/)[^\s\"'<>]+",
+            r"https?://(?:www\.|m\.)?douyin\.com/(?:video/|note/|share/(?:video|note)/)[^\s\"'<>]+",
             re.IGNORECASE,
         ),
     ),
     (
         "douyin_short",
         re.compile(r"https?://v\.douyin\.com/[^\s\"'<>]+", re.IGNORECASE),
-    ),
-    (
-        "tiktok",
-        re.compile(
-            r"https?://(?:www\.|vm\.)?tiktok\.com/[^\s\"'<>]+",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "youtube",
-        re.compile(
-            r"https?://(?:www\.|m\.)?youtube\.com/watch[^\s\"'<>]+",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "youtube_short",
-        re.compile(r"https?://youtu\.be/[^\s\"'<>]+", re.IGNORECASE),
-    ),
-    (
-        "weibo",
-        re.compile(
-            r"https?://(?:weibo\.com|m\.weibo\.cn)/(?:tv/show|status|[0-9]+/[A-Za-z0-9]+)[^\s\"'<>]*",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "kuaishou",
-        re.compile(
-            r"https?://(?:www\.|m\.)?kuaishou\.com/(?:video/|short-video/|f/)[^\s\"'<>]+",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "kuaishou_short",
-        re.compile(r"https?://v\.kuaishou\.com/[^\s\"'<>]+", re.IGNORECASE),
-    ),
-    (
-        "twitter",
-        re.compile(
-            r"https?://(?:twitter\.com|x\.com)/[^\s\"'<>]+/status/[0-9]+[^\s\"'<>]*",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "instagram",
-        re.compile(
-            r"https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[^\s\"'<>]+",
-            re.IGNORECASE,
-        ),
     ),
 ]
 
@@ -88,7 +38,7 @@ _BV_TO_URL = "https://www.bilibili.com/video/{bv}"
 
 
 def extract_video_url(text: str) -> str | None:
-    """Extract the first recognizable video URL from arbitrary text.
+    """Extract the first recognizable video/post URL from arbitrary text.
 
     Handles share text that mixes Chinese characters with embedded URLs,
     short links, and bare BV numbers.
@@ -109,5 +59,5 @@ def extract_video_url(text: str) -> str | None:
 
 
 def is_video_url(text: str) -> bool:
-    """Return True if text contains at least one recognised video URL."""
+    """Return True if text contains at least one recognised URL."""
     return extract_video_url(text) is not None
