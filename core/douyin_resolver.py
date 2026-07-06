@@ -36,8 +36,8 @@ class DouyinResult:
         return bool(self.image_urls) and not self.play_url
 
 
-# Matches /video/1234... or /note/1234... in the redirected canonical URL
-_AWEME_ID_RE = re.compile(r"/(?:video|note)/(\d{15,20})")
+# Matches /video/1234..., /note/1234..., or /slides/1234... in the redirected canonical URL
+_AWEME_ID_RE = re.compile(r"/(?:video|note|slides)/(\d{15,20})")
 
 # iOS UA — iesdouyin.com returns _ROUTER_DATA to mobile clients
 _IOS_HEADERS = {
@@ -127,7 +127,7 @@ def _extract_from_router_data(html: str, aweme_id: str) -> Optional[DouyinResult
 
     loader_data: dict = data.get("loaderData", {})
 
-    for key_tmpl in ("video_(id)/page", "note_(id)/page"):
+    for key_tmpl in ("video_(id)/page", "note_(id)/page", "slides_(id)/page"):
         page = loader_data.get(key_tmpl)
         if not isinstance(page, dict):
             continue
@@ -153,19 +153,26 @@ def _extract_from_router_data(html: str, aweme_id: str) -> Optional[DouyinResult
                     return DouyinResult(play_url=play_url, title=title)
                 logger.info("[douyin] play_url 为音频，尝试图片字段")
 
-        # --- Image/note post ---
+        # --- Image/slides post ---
         images: list = item.get("images") or item.get("image_list") or []
         image_urls: list[str] = []
         for img in images:
             if not isinstance(img, dict):
                 continue
-            urls = img.get("url_list") or []
-            if urls and isinstance(urls[0], str):
-                image_urls.append(urls[0])
+            candidates = [
+                img.get("url_list"),
+                img.get("download_url_list"),
+                img.get("animated_cover", {}).get("url_list") if isinstance(img.get("animated_cover"), dict) else None,
+                img.get("video", {}).get("play_addr", {}).get("url_list") if isinstance(img.get("video"), dict) else None,
+            ]
+            for urls in candidates:
+                if urls and isinstance(urls, list) and isinstance(urls[0], str):
+                    image_urls.append(urls[0])
+                    break
 
         if image_urls:
             logger.info(
-                "[douyin] 图文笔记帖子，提取到 %d 张图片 (key=%s)",
+                "[douyin] 图文/动图帖子，提取到 %d 个素材 (key=%s)",
                 len(image_urls),
                 key_tmpl,
             )
@@ -184,7 +191,9 @@ async def _fetch_and_extract(
     """Try iesdouyin.com then m.douyin.com, return DouyinResult or None."""
     candidates = [
         f"https://www.iesdouyin.com/share/video/{aweme_id}",
+        f"https://www.iesdouyin.com/share/slides/{aweme_id}",
         f"https://m.douyin.com/share/video/{aweme_id}",
+        f"https://m.douyin.com/share/slides/{aweme_id}",
     ]
 
     for candidate_url in candidates:

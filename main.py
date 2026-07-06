@@ -14,7 +14,7 @@ from .core.video_captioner import (
     DEFAULT_CAPTION_PROMPT,
     caption_from_url,
     caption_from_frames,
-    caption_from_image_urls,
+    caption_from_media_urls,
 )
 from .core.bili_subtitle import extract_bvid, fetch_bili_subtitle
 from .core.bili_resolver import is_bilibili_url, resolve_bilibili, download_bili_stream
@@ -24,7 +24,7 @@ from .core.douyin_resolver import is_douyin_url, resolve_douyin
 @register(
     "灵犀 · 视频链接理解",
     "灵犀",
-    "发送视频链接，AI 自动理解视频内容，支持抖音（视频/图文）、B站（含字幕提取）",
+    "发送视频链接，AI 自动理解视频内容，支持抖音（视频/图文/动图）、B站（含字幕提取）",
     "1.1.0",
     "https://github.com/gongzhudeng/astrbot_plugin_video_chat",
 )
@@ -115,16 +115,23 @@ class VideoChatPlugin(Star):
             prompt = str(self.config.get("caption_prompt", "") or "").strip() or DEFAULT_CAPTION_PROMPT
             max_images = max(1, int(self.config.get("max_images", 9) or 9))
             try:
-                caption = await caption_from_image_urls(
+                caption = await caption_from_media_urls(
                     _douyin_image_urls,
                     provider=provider,
                     prompt=prompt,
-                    max_images=max_images,
+                    max_media=max_images,
+                    frames_per_second=float(self.config.get("frames_per_second", 1.0) or 1.0),
+                    max_frames=max(1, int(self.config.get("max_frames", 30) or 30)),
+                    analyze_first_seconds=max(
+                        0,
+                        int(self.config.get("analyze_first_seconds", 120) or 120),
+                    ),
+                    ffmpeg_path=str(self.config.get("ffmpeg_path", "") or "").strip(),
                 )
             except RuntimeError as exc:
-                logger.warning("[video-chat] 图文转述失败：%s", exc)
-                return f"图文内容理解失败：{exc}"
-            return f"[图文内容转述]\n{caption}"
+                logger.warning("[video-chat] 图文/动图转述失败：%s", exc)
+                return f"图文/动图内容理解失败：{exc}"
+            return f"[图文/动图内容转述]\n{caption}"
 
         # --- Bilibili: bilibili-api-python (curl_cffi) first, yt-dlp as fallback ---
         if source is None and is_bilibili_url(clean_url):

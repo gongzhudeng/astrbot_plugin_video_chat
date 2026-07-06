@@ -161,6 +161,134 @@ async def caption_from_image_urls(
     return text
 
 
+def _guess_media_suffix(data: bytes, content_type: str = "") -> str:
+    content_type = content_type.lower()
+    if "mp4" in content_type or data[4:8] == b"ftyp":
+        return ".mp4"
+    if "webp" in content_type or (data[:4] == b"RIFF" and data[8:12] == b"WEBP"):
+        return ".webp"
+    if "gif" in content_type or data[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if "png" in content_type or data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if "jpeg" in content_type or "jpg" in content_type or data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    return ".bin"
+
+
+def _split_frame_budget(total_frames: int, item_count: int) -> list[int]:
+    item_count = max(1, item_count)
+    total_frames = max(1, total_frames)
+    base = max(1, total_frames // item_count)
+    remaining = max(0, total_frames - base * item_count)
+    return [base + (1 if idx < remaining else 0) for idx in range(item_count)]
+
+
+async def caption_from_media_urls(
+    media_urls: list[str],
+    *,
+    provider: object,
+    prompt: str = DEFAULT_CAPTION_PROMPT,
+    max_media: int = 9,
+    frames_per_second: float = 1.0,
+    max_frames: int = 30,
+    analyze_first_seconds: int = 120,
+    ffmpeg_path: str = "",
+) -> str:
+    """Caption mixed image/animated media URLs using one shared frame budget."""
+    import aiohttp
+
+    selected = media_urls[:max(1, max_media)]
+    if not selected:
+        raise RuntimeError("没有可用的图文素材")
+
+    _media_headers = {
+        "Accept": "video/mp4,image/jpeg,image/png,image/webp,image/gif,image/*,*/*;q=0.8",
+        "Referer": "https://www.douyin.com/",
+    }
+
+    with tempfile.TemporaryDirectory(prefix="vchat_media_") as tmpdir:
+        media_paths: list[Path] = []
+        async with aiohttp.ClientSession(headers=_media_headers) as session:
+            for idx, media_url in enumerate(selected):
+                try:
+                    async with session.get(media_url, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                        raw = await resp.read()
+                        suffix = _guess_media_suffix(raw, resp.headers.get("Content-Type", ""))
+                    path = Path(tmpdir) / f"media_{idx:03d}{suffix}"
+                    path.write_bytes(raw)
+                    media_paths.append(path)
+                except Exception as exc:
+                    logger.warning("[video-chat] 素材下载失败 %s：%s", media_url[:80], exc)
+
+        if not media_paths:
+            raise RuntimeError("所有图文素材下载均失败，无法转述")
+
+        budgets = _split_frame_budget(max_frames, len(media_paths))
+        frame_data_urls: list[str] = []
+        loop = asyncio.get_event_loop()
+        for media_path, budget in zip(media_paths, budgets):
+            if len(frame_data_urls) >= max_frames:
+                break
+            try:
+                extracted = await loop.run_in_executor(
+                    None,
+                    _extract_frames_sync,
+                    media_path,
+                    frames_per_second,
+                    budget,
+                    analyze_first_seconds,
+                    ffmpeg_path,
+                )
+                frame_data_urls.extend(extracted[: max_frames - len(frame_data_urls)])
+                continue
+            except RuntimeError:
+                pass
+
+            converted = _to_jpeg_bytes(media_path.read_bytes())
+            if converted is None:
+                logger.warning("[video-chat] 跳过不支持的图文素材：%s", media_path.name)
+                continue
+            payload = base64.b64encode(converted).decode("utf-8")
+            frame_data_urls.append(f"data:image/jpeg;base64,{payload}")
+
+    if not frame_data_urls:
+        raise RuntimeError("图文素材无法抽帧或转为图片")
+
+    image_blocks = [
+        {
+            "type": "image_url",
+            "image_url": {"url": data_url},
+        }
+        for data_url in frame_data_urls[:max_frames]
+    ]
+
+    contexts = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                *image_blocks,
+            ],
+        }
+    ]
+
+    logger.info(
+        "[video-chat] 图文/动图转述：%d 个素材共发送 %d 帧给视觉模型",
+        len(media_paths),
+        len(image_blocks),
+    )
+    try:
+        resp = await provider.text_chat(contexts=contexts)
+    except Exception as exc:
+        raise RuntimeError(f"视觉模型调用失败（图文/动图路径）：{exc}") from exc
+
+    text = str(getattr(resp, "completion_text", "") or "").strip()
+    if not text:
+        raise RuntimeError("视觉模型返回了空文本（图文/动图路径）")
+    return text
+
+
 async def caption_from_frames(
     local_path: Path,
     *,
