@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import aiohttp
 
@@ -524,6 +524,110 @@ def _normalize_cdp_comment_payload(
     return sorted(comments, key=lambda item: item.likes, reverse=True)[:count]
 
 
+async def _fetch_replies_via_cdp_page(
+    command: Any,
+    source_url: str,
+    aweme_id: str,
+    comment_id: str,
+    limit: int,
+) -> list[HotComment]:
+    if not comment_id or limit <= 0:
+        return []
+    source_params = dict(parse_qsl(urlsplit(source_url).query, keep_blank_values=True))
+    source_params.pop("a_bogus", None)
+    source_params.pop("aweme_id", None)
+    source_params.update(
+        {
+            "item_id": aweme_id,
+            "comment_id": comment_id,
+            "cursor": "0",
+            "count": str(min(20, limit)),
+            "cut_version": "1",
+        }
+    )
+    query = urlencode(source_params)
+    endpoint = (
+        "https://www.douyin.com/aweme/v1/web/comment/list/reply/"
+        f"?{query}&a_bogus={generate_a_bogus(query, _WEB_USER_AGENT)}"
+    )
+    expression = (
+        "(async () => {"
+        "const controller = new AbortController();"
+        "const timeout = setTimeout(() => controller.abort(), 8000);"
+        "try {"
+        f"const response = await fetch({json.dumps(endpoint)}, "
+        "{credentials: 'include', signal: controller.signal});"
+        "return {status: response.status, body: await response.text()};"
+        "} finally { clearTimeout(timeout); }"
+        "})()"
+    )
+    result = await command(
+        "Runtime.evaluate",
+        {
+            "expression": expression,
+            "awaitPromise": True,
+            "returnByValue": True,
+        },
+    )
+    value = (result.get("result") or {}).get("value") or {}
+    if not isinstance(value, dict) or int(value.get("status", 0) or 0) != 200:
+        raise RuntimeError(f"CDP 回复接口 HTTP {value.get('status', 'unknown')}")
+    try:
+        payload = json.loads(str(value.get("body", "") or ""))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("CDP 回复接口返回非 JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("CDP 回复接口返回空数据或非对象")
+    status = int(payload.get("status_code", 0) or 0)
+    if status != 0:
+        raise RuntimeError(f"CDP 回复接口业务状态异常：{status}")
+    return [
+        reply
+        for item in (payload.get("comments") or [])[:limit]
+        if isinstance(item, dict)
+        and (reply := _normalize_douyin_comment(item)) is not None
+    ]
+
+
+async def _fill_cdp_comment_replies(
+    command: Any,
+    comments: list[HotComment],
+    source_url: str,
+    aweme_id: str,
+    reply_limit: int,
+) -> None:
+    if reply_limit <= 0:
+        return
+    for comment in comments:
+        missing = min(reply_limit, comment.reply_count) - len(comment.replies)
+        if missing <= 0:
+            continue
+        try:
+            fetched = await _fetch_replies_via_cdp_page(
+                command,
+                source_url,
+                aweme_id,
+                comment.comment_id,
+                missing,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[douyin] CDP 评论 %s 回复补取失败：%s",
+                comment.comment_id,
+                exc,
+            )
+            continue
+        seen = {reply.comment_id for reply in comment.replies if reply.comment_id}
+        for reply in fetched:
+            if reply.comment_id and reply.comment_id in seen:
+                continue
+            comment.replies.append(reply)
+            if reply.comment_id:
+                seen.add(reply.comment_id)
+            if len(comment.replies) >= reply_limit:
+                break
+
+
 async def _fetch_comments_via_cdp(
     cdp_url: str,
     aweme_id: str,
@@ -694,6 +798,13 @@ async def _fetch_comments_via_cdp(
             raise RuntimeError(f"CDP 评论接口业务状态异常：{status}")
 
         comments = _normalize_cdp_comment_payload(payload, count, reply_limit)
+        await _fill_cdp_comment_replies(
+            command,
+            comments,
+            response_url,
+            aweme_id,
+            reply_limit,
+        )
         logger.info(
             "[douyin] 浏览器捕获评论成功：%d 条（来源 %s）",
             len(comments),

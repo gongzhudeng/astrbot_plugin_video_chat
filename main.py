@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import re
 import tempfile
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
 from astrbot import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
+from astrbot.core.agent.message import TextPart
 from astrbot.core.provider.provider import Provider, STTProvider
 from astrbot.core.star.star_tools import StarTools
 
@@ -21,6 +25,16 @@ from .core.bili_resolver import (
 from .core.bili_subtitle import fetch_bili_subtitle
 from .core.context_formatter import format_media_work, select_hot_comments
 from .core.douyin_resolver import DouyinResult, is_douyin_url, resolve_douyin
+from .core.media_input import (
+    VideoReference,
+    cleanup_owned_video_path,
+    cleanup_resolved_video,
+    direct_video_attachment_path,
+    extract_direct_video_references,
+    localize_direct_videos,
+    remove_direct_video_attachment_parts,
+    resolve_direct_video,
+)
 from .core.models import HotComment, MediaWork
 from .core.url_extractor import extract_video_url
 from .core.video_captioner import (
@@ -31,22 +45,119 @@ from .core.video_captioner import (
     caption_from_media_urls,
     caption_from_url,
 )
+from .core.video_context import prune_video_contexts, wrap_video_context
 from .core.video_resolver import VideoSource, resolve_video_url
 
 T = TypeVar("T")
+DEFAULT_DIRECT_VIDEO_QUESTION = "请概括这个视频的主要内容。"
+ATTACHMENT_ONLY_PROMPTS = {"<attachment>", "[视频]"}
+ATTACHMENT_ONLY_VIDEO_PATTERN = re.compile(r"\[(?:视频|Video)\d*\]", re.IGNORECASE)
+ANALYSIS_FAILURE_PREFIXES = ("视频链接解析失败", "视频附件解析失败")
+
+
+def _is_analysis_failure(result: str) -> bool:
+    return result.startswith(ANALYSIS_FAILURE_PREFIXES)
+
+
+@dataclass(frozen=True)
+class AnalysisOptions:
+    comment_count: int
+    comment_chars: int
+    comment_reply_limit: int
+    first_seconds: int
+    ffmpeg_path: str
+    download_dir: Path
+    max_bytes: int
 
 
 @register(
-    "灵犀 · 视频链接理解",
+    "灵犀 · 视频理解",
     "灵犀",
-    "发送视频链接，AI 自动理解视频内容，支持抖音（视频/图文/动图）、B站（含字幕提取）",
-    "1.3.1",
+    "自动理解直发视频与抖音/B站链接，并限制历史中的完整视频解析数量",
+    "2.3.0",
     "https://github.com/gongzhudeng/astrbot_plugin_video_chat",
 )
 class VideoChatPlugin(Star):
     def __init__(self, context: Context, config: dict) -> None:
         super().__init__(context)
         self.config = config or {}
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=20_000)
+    async def normalize_direct_video(self, event: AstrMessageEvent) -> None:
+        if not extract_direct_video_references(event):
+            return
+        try:
+            localized = await localize_direct_videos(
+                event,
+                cache_dir=self._direct_video_cache_dir(),
+                max_bytes=self._max_video_bytes(),
+                cache_ttl_seconds=max(
+                    60,
+                    int(
+                        self.config.get("direct_video_cache_ttl_seconds", 3600) or 3600
+                    ),
+                ),
+                cache_max_bytes=max(
+                    1,
+                    int(self.config.get("direct_video_cache_max_mb", 2048) or 2048),
+                )
+                * 1024
+                * 1024,
+            )
+            if localized:
+                logger.info("[video-chat] 已提前本地化 %d 个直发视频", len(localized))
+        except Exception as exc:
+            logger.exception("[video-chat] 直发视频提前本地化失败：%s", exc)
+
+    @filter.on_llm_request(priority=10_000)
+    async def inject_video_context(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+    ) -> None:
+        if not bool(self.config.get("auto_parse_video_messages", True)):
+            self._prune_request_video_contexts(req, incoming_details=0)
+            return
+
+        direct_videos = extract_direct_video_references(event)
+        direct_video = direct_videos[0] if direct_videos else None
+        clean_url = self._extract_supported_message_url(event)
+        if direct_video is None and not clean_url:
+            self._prune_request_video_contexts(req, incoming_details=0)
+            return
+
+        event.set_extra("video_chat_user_context", self._video_user_context(req.prompt))
+        if direct_video is not None:
+            attachment_path = direct_video_attachment_path(
+                list(req.extra_user_content_parts or [])
+            )
+            if attachment_path:
+                direct_video = replace(direct_video, path=attachment_path)
+            result = await self._analyze_direct_video(event, direct_video)
+            source_key = "direct-video"
+        else:
+            result = await self._do_analyze(event, clean_url)
+            source_key = clean_url
+
+        if not result.strip() or _is_analysis_failure(result):
+            self._prune_request_video_contexts(req, incoming_details=0)
+            if result.strip():
+                req.extra_user_content_parts.append(TextPart(text=result.strip()))
+            return
+        self._prune_request_video_contexts(req, incoming_details=1)
+        if direct_video is not None:
+            req.extra_user_content_parts = remove_direct_video_attachment_parts(
+                list(req.extra_user_content_parts or [])
+            )
+        req.extra_user_content_parts.append(TextPart(text=wrap_video_context(result)))
+        event.set_extra("video_chat_processed_source", source_key)
+        prompt = str(req.prompt or "").strip()
+        if (
+            not prompt
+            or prompt in ATTACHMENT_ONLY_PROMPTS
+            or ATTACHMENT_ONLY_VIDEO_PATTERN.fullmatch(prompt)
+        ):
+            req.prompt = DEFAULT_DIRECT_VIDEO_QUESTION
 
     @filter.command("视频")
     async def cmd_video(self, event: AstrMessageEvent) -> None:
@@ -75,34 +186,47 @@ class VideoChatPlugin(Star):
         clean_url = extract_video_url(url.strip()) if url.strip() else None
         if not clean_url:
             return "未能识别有效的视频链接，请检查 URL 格式是否正确。"
+        if event.get_extra("video_chat_processed_source"):
+            return (
+                "当前请求已自动解析一个视频，请直接根据已注入的视频解析结果回答用户，"
+                "不要继续分析其他媒体。"
+            )
         return await self._do_analyze(event, clean_url)
 
-    async def _do_analyze(self, event: AstrMessageEvent, clean_url: str) -> str:
+    def _analysis_options(self) -> AnalysisOptions:
         comment_enabled = bool(self.config.get("hot_comments_enabled", True))
         comment_count = (
             max(1, int(self.config.get("hot_comment_max_count", 10) or 10))
             if comment_enabled
             else 0
         )
-        comment_chars = max(
-            50, int(self.config.get("hot_comment_max_chars", 500) or 500)
+        return AnalysisOptions(
+            comment_count=comment_count,
+            comment_chars=max(
+                50, int(self.config.get("hot_comment_max_chars", 500) or 500)
+            ),
+            comment_reply_limit=(
+                max(0, int(self.config.get("hot_comment_reply_count", 2) or 0))
+                if comment_enabled
+                else 0
+            ),
+            first_seconds=max(
+                0, int(self.config.get("analyze_first_seconds", 120) or 0)
+            ),
+            ffmpeg_path=str(self.config.get("ffmpeg_path", "") or "").strip(),
+            download_dir=self._resolve_download_dir(),
+            max_bytes=max(1, int(self.config.get("max_video_size_mb", 200) or 200))
+            * 1024
+            * 1024,
         )
-        comment_reply_limit = (
-            max(0, int(self.config.get("hot_comment_reply_count", 2) or 0))
-            if comment_enabled
-            else 0
-        )
-        first_seconds = max(0, int(self.config.get("analyze_first_seconds", 120) or 0))
-        ffmpeg_path = str(self.config.get("ffmpeg_path", "") or "").strip()
-        download_dir = self._resolve_download_dir()
-        max_bytes = (
-            max(1, int(self.config.get("max_video_size_mb", 200) or 200)) * 1024 * 1024
-        )
+
+    async def _do_analyze(self, event: AstrMessageEvent, clean_url: str) -> str:
+        options = self._analysis_options()
 
         logger.info("[video-chat] 开始解析链接：%s", clean_url)
         with tempfile.TemporaryDirectory(
             prefix="video_chat_work_",
-            dir=str(download_dir),
+            dir=str(options.download_dir),
         ) as temp_dir_name:
             temp_dir = Path(temp_dir_name)
             try:
@@ -111,50 +235,129 @@ class VideoChatPlugin(Star):
                         event,
                         clean_url,
                         temp_dir,
-                        comment_count,
-                        comment_reply_limit,
-                        first_seconds,
-                        ffmpeg_path,
-                        max_bytes,
+                        options.comment_count,
+                        options.comment_reply_limit,
+                        options.first_seconds,
+                        options.ffmpeg_path,
+                        options.max_bytes,
                     )
                 elif is_douyin_url(clean_url):
                     work = await self._analyze_douyin(
                         event,
                         clean_url,
                         temp_dir,
-                        comment_count,
-                        comment_reply_limit,
-                        first_seconds,
-                        ffmpeg_path,
-                        max_bytes,
+                        options.comment_count,
+                        options.comment_reply_limit,
+                        options.first_seconds,
+                        options.ffmpeg_path,
+                        options.max_bytes,
                     )
                 else:
                     work = await self._analyze_generic(
                         event,
                         clean_url,
                         temp_dir,
-                        first_seconds,
-                        ffmpeg_path,
-                        max_bytes,
+                        options.first_seconds,
+                        options.ffmpeg_path,
+                        options.max_bytes,
                     )
             except Exception as exc:
                 logger.exception("[video-chat] 视频解析失败：%s", exc)
                 return "视频链接解析失败，请稍后重试或检查链接是否有效。"
 
+        return await self._finalize_work(event, work, options)
+
+    async def _analyze_direct_video(
+        self, event: AstrMessageEvent, reference: VideoReference
+    ) -> str:
+        options = self._analysis_options()
+        resolved = None
+        completed = False
+        try:
+            resolved = await resolve_direct_video(
+                reference, max_bytes=options.max_bytes
+            )
+            with tempfile.TemporaryDirectory(
+                prefix="video_chat_work_",
+                dir=str(options.download_dir),
+            ) as temp_dir_name:
+                temp_dir = Path(temp_dir_name)
+                work = MediaWork(
+                    platform="本地视频",
+                    source_url="",
+                    work_type="视频",
+                    local_video_path=resolved.path,
+                )
+                work.visual_summary = await self._caption_frames_with_fallback(
+                    event,
+                    resolved.path,
+                    options.first_seconds,
+                    options.ffmpeg_path,
+                )
+                if self._stt_enabled():
+                    work.transcript = await self._transcribe_with_fallback(
+                        event,
+                        resolved.path,
+                        temp_dir,
+                        options.first_seconds,
+                        options.ffmpeg_path,
+                    )
+                result = await self._finalize_work(event, work, options)
+                completed = True
+                return result
+        except Exception as exc:
+            logger.exception("[video-chat] 直发视频解析失败：%s", exc)
+            return "视频附件解析失败，请重新发送视频或检查文件是否有效。"
+        finally:
+            if completed and resolved is not None:
+                cleanup_owned_video_path(
+                    resolved.path,
+                    self._direct_video_cache_dir(),
+                )
+            cleanup_resolved_video(resolved)
+
+    async def _finalize_work(
+        self,
+        event: AstrMessageEvent,
+        work: MediaWork,
+        options: AnalysisOptions,
+    ) -> str:
         await self._caption_comment_media_if_enabled(
             event,
             work,
-            comment_count,
-            comment_chars,
-            comment_reply_limit,
-            ffmpeg_path,
+            options.comment_count,
+            options.comment_chars,
+            options.comment_reply_limit,
+            options.ffmpeg_path,
         )
         return format_media_work(
             work,
-            comment_max_count=comment_count,
-            comment_max_chars=comment_chars,
-            comment_reply_limit=comment_reply_limit,
+            comment_max_count=options.comment_count,
+            comment_max_chars=options.comment_chars,
+            comment_reply_limit=options.comment_reply_limit,
         )
+
+    def _extract_supported_message_url(self, event: AstrMessageEvent) -> str | None:
+        raw = str(event.message_str or "").strip()
+        clean_url = extract_video_url(raw) if raw else None
+        if clean_url and (is_bilibili_url(clean_url) or is_douyin_url(clean_url)):
+            return clean_url
+        return None
+
+    def _prune_request_video_contexts(
+        self,
+        req: ProviderRequest,
+        *,
+        incoming_details: int,
+    ) -> None:
+        limit = max(0, int(self.config.get("max_video_context_details", 3) or 0))
+        pruned = prune_video_contexts(
+            list(req.contexts or []),
+            max_details=limit,
+            incoming_details=incoming_details,
+        )
+        if pruned:
+            logger.info("[video-chat] 已清理 %d 个旧视频解析上下文", pruned)
 
     async def _analyze_bilibili(
         self,
@@ -388,7 +591,7 @@ class VideoChatPlugin(Star):
             lambda provider: caption_from_url(
                 url,
                 provider=provider,
-                prompt=self._caption_prompt(),
+                prompt=self._caption_prompt(event),
             ),
         )
 
@@ -404,7 +607,7 @@ class VideoChatPlugin(Star):
             lambda provider: caption_from_frames(
                 path,
                 provider=provider,
-                prompt=self._caption_prompt(),
+                prompt=self._caption_prompt(event),
                 frames_per_second=float(
                     self.config.get("frames_per_second", 1.0) or 1.0
                 ),
@@ -426,7 +629,7 @@ class VideoChatPlugin(Star):
             lambda provider: caption_from_media_urls(
                 urls,
                 provider=provider,
-                prompt=self._caption_prompt(),
+                prompt=self._caption_prompt(event),
                 max_media=max(1, int(self.config.get("max_images", 9) or 9)),
                 frames_per_second=float(
                     self.config.get("frames_per_second", 1.0) or 1.0
@@ -593,10 +796,50 @@ class VideoChatPlugin(Star):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _caption_prompt(self) -> str:
+    def _direct_video_cache_dir(self) -> Path:
+        path = (
+            StarTools.get_data_dir("astrbot_plugin_video_chat") / "direct_video_cache"
+        )
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _max_video_bytes(self) -> int:
         return (
+            max(1, int(self.config.get("max_video_size_mb", 200) or 200)) * 1024 * 1024
+        )
+
+    def _video_user_context(self, prompt: str | None) -> str:
+        value = str(prompt or "")
+        value = re.sub(
+            r"<image_context\b[^>]*>.*?</image_context>", "", value, flags=re.DOTALL
+        )
+        value = re.sub(
+            r"<quoted_message\b[^>]*>.*?</quoted_message>", "", value, flags=re.DOTALL
+        )
+        value = re.sub(r"\[(?:视频|Video)(?:\d+)?\]", "", value, flags=re.IGNORECASE)
+        value = " ".join(value.split()).strip()
+        if not value or value in ATTACHMENT_ONLY_PROMPTS:
+            return ""
+        max_chars = max(
+            0, int(self.config.get("video_user_context_max_chars", 500) or 0)
+        )
+        return value[:max_chars] if max_chars else ""
+
+    def _caption_prompt(self, event: AstrMessageEvent | None = None) -> str:
+        base = (
             str(self.config.get("caption_prompt", "") or "").strip()
             or DEFAULT_CAPTION_PROMPT
+        )
+        if event is None:
+            return base
+        context = str(event.get_extra("video_chat_user_context", "") or "").strip()
+        if not context:
+            return base
+        return (
+            f"{base}\n\n"
+            "以下是用户与该视频同一轮发送的文字，仅用于理解提问语境；"
+            "不要把用户的猜测当成视频中实际出现的事实：\n"
+            f"<user_context>{context}</user_context>"
         )
 
     def _comment_media_caption_prompt(self) -> str:

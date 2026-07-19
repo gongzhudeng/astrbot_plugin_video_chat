@@ -1,4 +1,43 @@
 {
+  "auto_parse_video_messages": {
+    "type": "bool",
+    "description": "自动解析消息中的视频",
+    "hint": "开启后自动解析当前消息中的直发视频，以及明确出现的抖音/B站链接。引用视频不会重复解析。关闭后仅保留 /视频 命令和 analyze_video 工具模式。",
+    "default": true
+  },
+  "max_video_context_details": {
+    "type": "int",
+    "description": "最大保留完整视频上下文数量",
+    "hint": "直发视频和自动解析链接统一计数。超过数量后，仅把更旧的视频解析详情替换为轻量标记，用户原话和 AI 回复保持不变。0 表示不限制。",
+    "slider": {
+      "min": 0,
+      "max": 20,
+      "step": 1
+    },
+    "default": 3
+  },
+  "direct_video_cache_ttl_seconds": {
+    "type": "int",
+    "description": "直发视频缓存保留时间（秒）",
+    "hint": "QQ/NapCat 直发视频会在核心附件处理前下载到插件缓存。成功解析后立即删除；异常中断的文件超过此时间后清理。建议大于消息合并器的最长等待时间。",
+    "slider": {
+      "min": 60,
+      "max": 86400,
+      "step": 60
+    },
+    "default": 3600
+  },
+  "direct_video_cache_max_mb": {
+    "type": "int",
+    "description": "直发视频缓存容量上限（MB）",
+    "hint": "超过容量时优先清理最旧的已完成缓存文件；正在下载的临时文件不参与容量淘汰。",
+    "slider": {
+      "min": 100,
+      "max": 10240,
+      "step": 100
+    },
+    "default": 2048
+  },
   "caption_provider_id": {
     "type": "string",
     "description": "视频转述模型供应商",
@@ -18,6 +57,12 @@
     "description": "转述提示词",
     "hint": "发给视觉模型的提示词。可在此处加上字数限制（例如：不超过 300 字）来控制输出长度。",
     "default": "请用不超过 300 字简洁概括这个视频的核心内容，包括主要人物、事件和关键信息。如果画面中有字幕，请以字幕内容为准。不要编造没有出现的信息。"
+  },
+  "video_user_context_max_chars": {
+    "type": "int",
+    "description": "视频同轮文字语境最大长度",
+    "hint": "将视频同轮发送的用户文字追加给视频转述模型时的最大字符数。0 表示不追加用户文字。",
+    "default": 500
   },
   "allow_local_download": {
     "type": "bool",
