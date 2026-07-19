@@ -6,10 +6,10 @@ Flow:
     → GET /x/player/v2            → subtitle list URLs
     → download subtitle JSON      → plain text
 """
+
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 import aiohttp
 
@@ -31,13 +31,13 @@ _COMMON_HEADERS = {
 }
 
 
-def extract_bvid(url: str) -> Optional[str]:
+def extract_bvid(url: str) -> str | None:
     """Extract BV number from a Bilibili URL or plain text."""
     m = _BVID_RE.search(url)
     return m.group(0) if m else None
 
 
-def extract_avid(url: str) -> Optional[str]:
+def extract_avid(url: str) -> str | None:
     """Extract av number (digits only) from a Bilibili URL."""
     m = _AVID_RE.search(url)
     return m.group(1) if m else None
@@ -50,9 +50,9 @@ def _build_cookies(sessdata: str) -> dict[str, str]:
 async def _get_video_info(
     session: aiohttp.ClientSession,
     *,
-    bvid: Optional[str] = None,
-    avid: Optional[str] = None,
-) -> tuple[Optional[int], Optional[int]]:
+    bvid: str | None = None,
+    avid: str | None = None,
+) -> tuple[int | None, int | None]:
     """Return (aid, cid) for the first part of the video, or (None, None) on failure."""
     params: dict[str, str] = {}
     if bvid:
@@ -63,14 +63,18 @@ async def _get_video_info(
         return None, None
 
     try:
-        async with session.get(_VIEW_API, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(
+            _VIEW_API, params=params, timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
             data = await resp.json(content_type=None)
     except Exception as exc:
         logger.warning("[bili-subtitle] 获取视频信息失败：%s", exc)
         return None, None
 
     if data.get("code") != 0:
-        logger.warning("[bili-subtitle] /x/web-interface/view 返回错误：%s", data.get("message"))
+        logger.warning(
+            "[bili-subtitle] /x/web-interface/view 返回错误：%s", data.get("message")
+        )
         return None, None
 
     video_data = data.get("data") or {}
@@ -89,7 +93,9 @@ async def _get_subtitle_urls(
     """Return list of (language, subtitle_url) pairs."""
     params = {"aid": str(aid), "cid": str(cid)}
     try:
-        async with session.get(_PLAYER_V2_API, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(
+            _PLAYER_V2_API, params=params, timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
             data = await resp.json(content_type=None)
     except Exception as exc:
         logger.warning("[bili-subtitle] 获取字幕列表失败：%s", exc)
@@ -114,7 +120,7 @@ async def _get_subtitle_urls(
 async def _download_subtitle_text(
     session: aiohttp.ClientSession,
     url: str,
-) -> Optional[str]:
+) -> str | None:
     """Download subtitle JSON and convert body entries to plain text."""
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -133,7 +139,7 @@ async def _download_subtitle_text(
     return "\n".join(lines) if lines else None
 
 
-async def fetch_bili_subtitle(url: str, sessdata: str) -> Optional[str]:
+async def fetch_bili_subtitle(url: str, sessdata: str) -> str | None:
     """Fetch subtitle text for a Bilibili video URL.
 
     Returns plain-text subtitle string, or None if unavailable.
@@ -160,8 +166,8 @@ async def fetch_bili_subtitle(url: str, sessdata: str) -> Optional[str]:
             return None
 
         # Prefer Chinese (zh-CN / ai-zh), then first available
-        preferred_url: Optional[str] = None
-        fallback_url: Optional[str] = None
+        preferred_url: str | None = None
+        fallback_url: str | None = None
         for lang, sub_url in subtitle_list:
             lang_lower = lang.lower()
             if "zh" in lang_lower or "中" in lang_lower:

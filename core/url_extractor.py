@@ -23,7 +23,7 @@ _PLATFORM_PATTERNS: list[tuple[str, re.Pattern]] = [
     (
         "douyin",
         re.compile(
-            r"https?://(?:www\.|m\.)?douyin\.com/(?:video/|note/|share/(?:video|note)/)[^\s\"'<>]+",
+            r"https?://(?:www\.|m\.)?douyin\.com/(?:video/|note/|slides/|share/(?:video|note|slides)/)[^\s\"'<>]+",
             re.IGNORECASE,
         ),
     ),

@@ -18,6 +18,21 @@ DEFAULT_CAPTION_PROMPT = (
     "不要编造没有出现的信息。"
 )
 
+DEFAULT_COMMENT_MEDIA_PROMPT = (
+    "请逐张客观描述评论区图片表达的内容、可读文字和与评论语境有关的信息。"
+    "不要判断视频类型，不要扩展评论观点，不要编造。"
+)
+
+COMMENT_MEDIA_OUTPUT_PROTOCOL = (
+    "每张图片前都有唯一编号。每张图片只输出一行，"
+    "严格使用“编号: 描述”的格式，不要遗漏或修改编号。"
+)
+
+
+def build_comment_media_prompt(prompt: str) -> str:
+    prompt_text = prompt.strip() or DEFAULT_COMMENT_MEDIA_PROMPT
+    return f"{prompt_text}\n\n{COMMENT_MEDIA_OUTPUT_PROTOCOL}"
+
 
 async def caption_from_url(
     stream_url: str,
@@ -59,8 +74,10 @@ def _to_jpeg_bytes(data: bytes) -> bytes | None:
     Falls back to returning the original data if it already looks like JPEG/PNG/GIF/WEBP/BMP.
     """
     try:
-        from PIL import Image
         import io
+
+        from PIL import Image
+
         img = Image.open(io.BytesIO(data))
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
@@ -98,7 +115,7 @@ async def caption_from_image_urls(
     """
     import aiohttp
 
-    selected = image_urls[:max(1, max_images)]
+    selected = image_urls[: max(1, max_images)]
     image_blocks = []
 
     # Prefer JPEG/PNG/WEBP — avoids AVIF responses from Douyin/XHS CDNs
@@ -110,7 +127,9 @@ async def caption_from_image_urls(
     async with aiohttp.ClientSession(headers=_img_headers) as session:
         for img_url in selected:
             try:
-                async with session.get(img_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                async with session.get(
+                    img_url, timeout=aiohttp.ClientTimeout(total=20)
+                ) as resp:
                     raw = await resp.read()
                 # Convert to JPEG (handles AVIF/HEIC/unknown formats via Pillow)
                 converted = _to_jpeg_bytes(raw)
@@ -129,10 +148,12 @@ async def caption_from_image_urls(
                 else:
                     mime = "image/jpeg"
                 payload = base64.b64encode(converted).decode("utf-8")
-                image_blocks.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{payload}"},
-                })
+                image_blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{payload}"},
+                    }
+                )
             except Exception as exc:
                 logger.warning("[video-chat] 图片下载失败 %s：%s", img_url[:80], exc)
 
@@ -149,7 +170,11 @@ async def caption_from_image_urls(
         }
     ]
 
-    logger.info("[video-chat] 图文转述：发送 %d/%d 张图片给视觉模型", len(image_blocks), len(image_urls))
+    logger.info(
+        "[video-chat] 图文转述：发送 %d/%d 张图片给视觉模型",
+        len(image_blocks),
+        len(image_urls),
+    )
     try:
         resp = await provider.text_chat(contexts=contexts)
     except Exception as exc:
@@ -198,7 +223,7 @@ async def caption_from_media_urls(
     """Caption mixed image/animated media URLs using one shared frame budget."""
     import aiohttp
 
-    selected = media_urls[:max(1, max_media)]
+    selected = media_urls[: max(1, max_media)]
     if not selected:
         raise RuntimeError("没有可用的图文素材")
 
@@ -212,14 +237,20 @@ async def caption_from_media_urls(
         async with aiohttp.ClientSession(headers=_media_headers) as session:
             for idx, media_url in enumerate(selected):
                 try:
-                    async with session.get(media_url, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                    async with session.get(
+                        media_url, timeout=aiohttp.ClientTimeout(total=25)
+                    ) as resp:
                         raw = await resp.read()
-                        suffix = _guess_media_suffix(raw, resp.headers.get("Content-Type", ""))
+                        suffix = _guess_media_suffix(
+                            raw, resp.headers.get("Content-Type", "")
+                        )
                     path = Path(tmpdir) / f"media_{idx:03d}{suffix}"
                     path.write_bytes(raw)
                     media_paths.append(path)
                 except Exception as exc:
-                    logger.warning("[video-chat] 素材下载失败 %s：%s", media_url[:80], exc)
+                    logger.warning(
+                        "[video-chat] 素材下载失败 %s：%s", media_url[:80], exc
+                    )
 
         if not media_paths:
             raise RuntimeError("所有图文素材下载均失败，无法转述")
@@ -289,6 +320,103 @@ async def caption_from_media_urls(
     return text
 
 
+async def caption_comment_media(
+    media_items: list[tuple[str, str]],
+    *,
+    provider: object,
+    prompt: str = DEFAULT_COMMENT_MEDIA_PROMPT,
+    max_media: int = 6,
+    ffmpeg_path: str = "",
+) -> dict[str, str]:
+    """Describe numbered comment media in one model request."""
+    import aiohttp
+
+    selected = media_items[: max(1, max_media)]
+    if not selected:
+        return {}
+
+    blocks: list[dict] = [{"type": "text", "text": build_comment_media_prompt(prompt)}]
+    with tempfile.TemporaryDirectory(prefix="vchat_comment_media_") as tmpdir:
+        async with aiohttp.ClientSession(
+            headers={
+                "Accept": "video/mp4,image/jpeg,image/png,image/webp,image/gif,image/*,*/*;q=0.8",
+                "Referer": "https://www.douyin.com/",
+            }
+        ) as session:
+            for index, (media_id, media_url) in enumerate(selected):
+                try:
+                    async with session.get(
+                        media_url, timeout=aiohttp.ClientTimeout(total=20)
+                    ) as response:
+                        response.raise_for_status()
+                        raw = await response.read()
+                        suffix = _guess_media_suffix(
+                            raw, response.headers.get("Content-Type", "")
+                        )
+                    converted = _to_jpeg_bytes(raw)
+                    if converted is None and suffix == ".mp4":
+                        path = Path(tmpdir) / f"comment_{index:03d}.mp4"
+                        path.write_bytes(raw)
+                        frames = await asyncio.get_running_loop().run_in_executor(
+                            None,
+                            _extract_frames_sync,
+                            path,
+                            1.0,
+                            1,
+                            1,
+                            ffmpeg_path,
+                        )
+                        data_url = frames[0]
+                    elif converted is not None:
+                        payload = base64.b64encode(converted).decode("utf-8")
+                        data_url = f"data:image/jpeg;base64,{payload}"
+                    else:
+                        logger.warning(
+                            "[video-chat] 跳过不支持的评论媒体：%s", media_url[:80]
+                        )
+                        continue
+                    blocks.extend(
+                        [
+                            {"type": "text", "text": f"图片编号：{media_id}"},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ]
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[video-chat] 评论媒体下载或取帧失败 %s：%s",
+                        media_url[:80],
+                        exc,
+                    )
+
+    if len(blocks) == 1:
+        return {}
+    try:
+        response = await provider.text_chat(
+            contexts=[{"role": "user", "content": blocks}]
+        )
+    except Exception as exc:
+        raise RuntimeError(f"评论图片模型调用失败：{exc}") from exc
+    text = str(getattr(response, "completion_text", "") or "").strip()
+    if not text:
+        raise RuntimeError("评论图片模型返回了空文本")
+
+    descriptions: dict[str, str] = {}
+    valid_ids = {media_id for media_id, _ in selected}
+    for line in text.splitlines():
+        clean = line.strip().lstrip("-* ")
+        if ":" in clean:
+            media_id, description = clean.split(":", 1)
+        elif "：" in clean:
+            media_id, description = clean.split("：", 1)
+        else:
+            continue
+        media_id = media_id.strip()
+        description = " ".join(description.split()).strip()
+        if media_id in valid_ids and description:
+            descriptions[media_id] = description
+    return descriptions
+
+
 async def caption_from_frames(
     local_path: Path,
     *,
@@ -346,6 +474,7 @@ async def caption_from_frames(
 # Synchronous ffmpeg helper
 # ---------------------------------------------------------------------------
 
+
 def _extract_frames_sync(
     local_path: Path,
     frames_per_second: float,
@@ -400,10 +529,14 @@ def _extract_frames_sync(
         if analyze_first_seconds > 0 and analyze_duration:
             cmd += ["-t", str(analyze_duration)]
         cmd += [
-            "-i", str(local_path),
-            "-vf", f"fps={fps_expr}",
-            "-frames:v", str(actual_count),
-            "-q:v", "5",
+            "-i",
+            str(local_path),
+            "-vf",
+            f"fps={fps_expr}",
+            "-frames:v",
+            str(actual_count),
+            "-q:v",
+            "5",
             out_pattern,
         ]
         try:
@@ -413,7 +546,9 @@ def _extract_frames_sync(
 
         frame_files = sorted(glob.glob(os.path.join(tmpdir, "frame_*.jpg")))
         if not frame_files:
-            raise RuntimeError("ffmpeg 运行成功但未生成任何帧文件，请检查视频文件是否有效。")
+            raise RuntimeError(
+                "ffmpeg 运行成功但未生成任何帧文件，请检查视频文件是否有效。"
+            )
 
         data_urls = []
         for path in frame_files:
@@ -443,9 +578,12 @@ def _probe_duration(local_path: Path, ffmpeg_path: str) -> float | None:
         result = subprocess.run(
             [
                 ffprobe_cmd,
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
                 str(local_path),
             ],
             check=True,

@@ -6,6 +6,13 @@
     "default": "",
     "_special": "select_provider"
   },
+  "caption_fallback_provider_id": {
+    "type": "string",
+    "description": "视频转述兜底模型",
+    "hint": "首选视频转述模型失败时，自动尝试此模型。",
+    "default": "",
+    "_special": "select_provider"
+  },
   "caption_prompt": {
     "type": "text",
     "description": "转述提示词",
@@ -90,8 +97,107 @@
   "bili_subtitle_plus_frames": {
     "type": "bool",
     "description": "字幕同时抽帧",
-    "hint": "仅在 B站链接有字幕时生效。关闭（默认）= 有字幕就只发字幕文本给模型，省资源；开启 = 字幕文本 + 抽帧图片一起发给模型，画面感更强但消耗更多资源。",
+    "hint": "仅在 B站链接有字幕时生效。关闭（默认）= 有字幕就只提供字幕；开启 = 字幕文本 + 画面转述。",
     "default": false
+  },
+  "stt_enabled": {
+    "type": "bool",
+    "description": "启用视频语音识别",
+    "hint": "视频无字幕时提取音频并调用 STT 模型逐字转写。失败时自动尝试兜底模型，全部失败则省略语音内容。",
+    "default": false
+  },
+  "stt_provider_id": {
+    "type": "string",
+    "description": "首选 STT 模型",
+    "hint": "留空则使用当前会话配置的 STT 模型。",
+    "default": "",
+    "_special": "select_provider_stt"
+  },
+  "stt_fallback_provider_id": {
+    "type": "string",
+    "description": "STT 兜底模型",
+    "hint": "首选 STT 模型失败时，自动尝试此模型。",
+    "default": "",
+    "_special": "select_provider_stt"
+  },
+  "stt_follow_visual_duration": {
+    "type": "bool",
+    "description": "语音识别跟随画面时长",
+    "hint": "开启时与“只分析前 N 秒”保持一致；关闭时识别完整音频。",
+    "default": true
+  },
+  "hot_comments_enabled": {
+    "type": "bool",
+    "description": "读取高赞评论",
+    "hint": "读取 B站和抖音的一级评论并按点赞数从高到低提供给 AI；获取失败不会影响视频解析。",
+    "default": true
+  },
+  "hot_comment_max_count": {
+    "type": "int",
+    "description": "高赞评论最多条数",
+    "slider": {
+      "min": 1,
+      "max": 30,
+      "step": 1
+    },
+    "default": 10
+  },
+  "hot_comment_reply_count": {
+    "type": "int",
+    "description": "每条高赞评论最多回复数",
+    "hint": "B站和抖音均适用。总字数不足时会先减少回复，再减少低赞评论。",
+    "slider": {
+      "min": 0,
+      "max": 10,
+      "step": 1
+    },
+    "default": 2
+  },
+  "comment_media_caption_enabled": {
+    "type": "bool",
+    "description": "分析评论区图片",
+    "hint": "使用视频转述首选/兜底模型，按独立的评论图片规则批量描述图片。关闭后仍读取评论文字与回复，但不下载图片、不调用模型，可节省费用。动图只分析一帧。",
+    "default": false
+  },
+  "comment_media_caption_prompt": {
+    "type": "text",
+    "description": "评论图片分析提示词",
+    "hint": "仅用于评论及回复中的图片、动图代表帧，与视频转述提示词相互独立。可自由设置描述重点和篇幅；编号输出协议由插件自动追加。",
+    "default": "请逐张客观描述评论区图片表达的内容、可读文字和与评论语境有关的信息。不要判断视频类型，不要扩展评论观点，不要编造。"
+  },
+  "comment_media_max_count": {
+    "type": "int",
+    "description": "评论图片单次最多分析数量",
+    "hint": "仅在“分析评论区图片”开启时生效；本轮入选评论及回复共用此上限。",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "default": 6
+  },
+  "douyin_comment_browser_fallback_enabled": {
+    "type": "bool",
+    "description": "抖音评论浏览器模式",
+    "hint": "开启后优先连接已开启远程调试并登录抖音的 Chrome/Edge，捕获页面真实评论请求；失败后再尝试轻量签名。仅打开本开关不会自动启动浏览器。",
+    "default": false
+  },
+  "douyin_comment_cdp_url": {
+    "type": "string",
+    "description": "抖音评论浏览器调试地址",
+    "hint": "仅抖音评论浏览器模式开启时生效，例如 http://127.0.0.1:9222。",
+    "default": "http://127.0.0.1:9222"
+  },
+  "hot_comment_max_chars": {
+    "type": "int",
+    "description": "高赞评论总字数上限",
+    "hint": "评论正文、图片描述和回复共用此上限。优先保留最高赞评论；达到上限时先减少回复，再停止加入低赞评论，不截断半条内容。",
+    "slider": {
+      "min": 100,
+      "max": 2000,
+      "step": 50
+    },
+    "default": 500
   },
   "max_images": {
     "type": "int",

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,7 +51,9 @@ def _sanitize_cookies_file(path: str) -> str:
        these two fields are consistent; many browser exporters get this wrong.
     """
     src = Path(path)
-    lines: list[str] = src.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    lines: list[str] = src.read_text(encoding="utf-8", errors="replace").splitlines(
+        keepends=True
+    )
     cleaned: list[str] = []
     for line in lines:
         stripped = line.strip()
@@ -75,7 +76,7 @@ def _sanitize_cookies_file(path: str) -> str:
         domain = parts[0]
         if domain.startswith(".") and parts[1].upper() != "TRUE":
             parts[1] = "TRUE"
-            eol = line[len(stripped):]  # preserve original line ending
+            eol = line[len(stripped) :]  # preserve original line ending
             cleaned.append("\t".join(parts) + eol)
             continue
         cleaned.append(line)
@@ -130,7 +131,11 @@ def _extract_stream_url(info: dict) -> str | None:
         vcodec = fmt.get("vcodec") or ""
         acodec = fmt.get("acodec") or ""
         fmt_url = fmt.get("url") or ""
-        if vcodec not in ("none", "") and acodec not in ("none", "") and fmt_url.startswith("http"):
+        if (
+            vcodec not in ("none", "")
+            and acodec not in ("none", "")
+            and fmt_url.startswith("http")
+        ):
             return fmt_url
 
     # Fallback: any video stream
@@ -164,7 +169,9 @@ async def resolve_video_url(
     loop = asyncio.get_event_loop()
 
     # --- Step 1: extract info only (no download) ---
-    info = await loop.run_in_executor(None, _extract_info_sync, url, proxy, cookies_file)
+    info = await loop.run_in_executor(
+        None, _extract_info_sync, url, proxy, cookies_file
+    )
     title: str | None = info.get("title") if info else None
 
     # --- Step 2: try to get a direct stream URL ---
@@ -200,15 +207,22 @@ async def resolve_video_url(
 # Synchronous helpers (run in executor to avoid blocking the event loop)
 # ---------------------------------------------------------------------------
 
-def _extract_info_sync(url: str, proxy: str | None, cookies_file: str | None) -> dict | None:
+
+def _extract_info_sync(
+    url: str, proxy: str | None, cookies_file: str | None
+) -> dict | None:
     try:
         import yt_dlp  # type: ignore[import]
     except ImportError:
         raise RuntimeError("yt-dlp 未安装，请检查 requirements.txt 并重启 AstrBot。")
 
-    sanitized: str | None = _sanitize_cookies_file(cookies_file) if cookies_file else None
+    sanitized: str | None = (
+        _sanitize_cookies_file(cookies_file) if cookies_file else None
+    )
     try:
-        opts = _build_ydl_opts(proxy=proxy, download=False, cookies_file=sanitized or cookies_file)
+        opts = _build_ydl_opts(
+            proxy=proxy, download=False, cookies_file=sanitized or cookies_file
+        )
         with yt_dlp.YoutubeDL(opts) as ydl:
             try:
                 return ydl.extract_info(url, download=False)
@@ -234,7 +248,9 @@ def _download_to_temp_sync(
     except ImportError:
         raise RuntimeError("yt-dlp 未安装，请检查 requirements.txt 并重启 AstrBot。")
 
-    sanitized: str | None = _sanitize_cookies_file(cookies_file) if cookies_file else None
+    sanitized: str | None = (
+        _sanitize_cookies_file(cookies_file) if cookies_file else None
+    )
     try:
         tmpdir = tempfile.TemporaryDirectory(
             prefix="video_chat_",
