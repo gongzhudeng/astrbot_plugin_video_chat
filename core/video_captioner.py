@@ -540,7 +540,14 @@ def _extract_frames_sync(
             out_pattern,
         ]
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"ffmpeg 抽帧失败：{exc.stderr}") from exc
 
@@ -589,6 +596,8 @@ def _probe_duration(local_path: Path, ffmpeg_path: str) -> float | None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return float(result.stdout.strip())
     except Exception:

@@ -54,7 +54,7 @@ class DouyinResult:
 
 
 # Matches /video/1234..., /note/1234..., or /slides/1234... in the redirected canonical URL
-_AWEME_ID_RE = re.compile(r"/(?:video|note|slides)/(\d{15,20})")
+_AWEME_REF_RE = re.compile(r"/(video|note|slides)/(\d{15,20})")
 
 # iOS UA — iesdouyin.com returns _ROUTER_DATA to mobile clients
 _IOS_HEADERS = {
@@ -127,9 +127,11 @@ async def _resolve_short_url(url: str, session: aiohttp.ClientSession) -> str:
         return url
 
 
-def _extract_aweme_id(url: str) -> str | None:
-    m = _AWEME_ID_RE.search(url)
-    return m.group(1) if m else None
+def _extract_aweme_ref(url: str) -> tuple[str | None, str | None]:
+    match = _AWEME_REF_RE.search(url)
+    if not match:
+        return None, None
+    return match.group(2), match.group(1)
 
 
 def _extract_topics(item: dict[str, Any]) -> list[str]:
@@ -168,7 +170,58 @@ def _build_result(item: dict[str, Any], aweme_id: str) -> DouyinResult:
     )
 
 
-def _extract_from_router_data(html: str, aweme_id: str) -> DouyinResult | None:
+def _extract_image_urls(item: dict[str, Any]) -> list[str]:
+    images: list = item.get("images") or item.get("image_list") or []
+    image_urls: list[str] = []
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        candidates = [
+            image.get("url_list"),
+            image.get("download_url_list"),
+            image.get("animated_cover", {}).get("url_list")
+            if isinstance(image.get("animated_cover"), dict)
+            else None,
+            image.get("video", {}).get("play_addr", {}).get("url_list")
+            if isinstance(image.get("video"), dict)
+            else None,
+        ]
+        for urls in candidates:
+            if urls and isinstance(urls, list) and isinstance(urls[0], str):
+                image_urls.append(urls[0])
+                break
+    return image_urls
+
+
+def _extract_play_url(item: dict[str, Any]) -> str | None:
+    video_obj = item.get("video")
+    if not isinstance(video_obj, dict):
+        return None
+    url_list: list = video_obj.get("play_addr", {}).get("url_list", [])
+    if not url_list or not isinstance(url_list[0], str):
+        return None
+    play_url = url_list[0].replace("playwm", "play")
+    lower_url = play_url.lower()
+    if any(
+        token in lower_url
+        for token in (
+            ".mp3",
+            ".m4a",
+            ".aac",
+            "ies-music",
+            "mime_type=audio",
+            "/music/",
+        )
+    ):
+        return None
+    return play_url
+
+
+def _extract_from_router_data(
+    html: str,
+    aweme_id: str,
+    preferred_type: str | None = None,
+) -> DouyinResult | None:
     """Parse window._ROUTER_DATA and return a DouyinResult (video or image post)."""
     m = re.search(
         r"window\._ROUTER_DATA\s*=\s*(.*?)</script>",
@@ -187,8 +240,15 @@ def _extract_from_router_data(html: str, aweme_id: str) -> DouyinResult | None:
         return None
 
     loader_data: dict = data.get("loaderData", {})
+    page_types = [preferred_type] if preferred_type else []
+    page_types.extend(
+        page_type
+        for page_type in ("video", "note", "slides")
+        if page_type not in page_types
+    )
 
-    for key_tmpl in ("video_(id)/page", "note_(id)/page", "slides_(id)/page"):
+    for page_type in page_types:
+        key_tmpl = f"{page_type}_(id)/page"
         page = loader_data.get(key_tmpl)
         if not isinstance(page, dict):
             continue
@@ -197,53 +257,22 @@ def _extract_from_router_data(html: str, aweme_id: str) -> DouyinResult | None:
             continue
         item = item_list[0]
         result = _build_result(item, aweme_id)
+        image_urls = _extract_image_urls(item)
+        play_url = _extract_play_url(item)
 
-        # --- Video post ---
-        video_obj = item.get("video")
-        if isinstance(video_obj, dict):
-            url_list: list = video_obj.get("play_addr", {}).get("url_list", [])
-            if url_list and isinstance(url_list[0], str):
-                play_url = url_list[0].replace("playwm", "play")
-                _lower = play_url.lower()
-                is_audio = any(
-                    tok in _lower
-                    for tok in (
-                        ".mp3",
-                        ".m4a",
-                        ".aac",
-                        "ies-music",
-                        "mime_type=audio",
-                        "/music/",
-                    )
-                )
-                if not is_audio:
-                    logger.info(
-                        "[douyin] 从 _ROUTER_DATA[%s] 提取到 play_url", key_tmpl
-                    )
-                    result.play_url = play_url
-                    return result
-                logger.info("[douyin] play_url 为音频，尝试图片字段")
+        if preferred_type in {"note", "slides"} and image_urls:
+            logger.info(
+                "[douyin] 图文/动图帖子，提取到 %d 个素材 (key=%s)",
+                len(image_urls),
+                key_tmpl,
+            )
+            result.image_urls = image_urls
+            return result
 
-        # --- Image/slides post ---
-        images: list = item.get("images") or item.get("image_list") or []
-        image_urls: list[str] = []
-        for img in images:
-            if not isinstance(img, dict):
-                continue
-            candidates = [
-                img.get("url_list"),
-                img.get("download_url_list"),
-                img.get("animated_cover", {}).get("url_list")
-                if isinstance(img.get("animated_cover"), dict)
-                else None,
-                img.get("video", {}).get("play_addr", {}).get("url_list")
-                if isinstance(img.get("video"), dict)
-                else None,
-            ]
-            for urls in candidates:
-                if urls and isinstance(urls, list) and isinstance(urls[0], str):
-                    image_urls.append(urls[0])
-                    break
+        if play_url:
+            logger.info("[douyin] 从 _ROUTER_DATA[%s] 提取到 play_url", key_tmpl)
+            result.play_url = play_url
+            return result
 
         if image_urls:
             logger.info(
@@ -262,14 +291,21 @@ def _extract_from_router_data(html: str, aweme_id: str) -> DouyinResult | None:
 
 
 async def _fetch_and_extract(
-    aweme_id: str, session: aiohttp.ClientSession
+    aweme_id: str,
+    session: aiohttp.ClientSession,
+    preferred_type: str | None = None,
 ) -> DouyinResult | None:
-    """Try iesdouyin.com then m.douyin.com, return DouyinResult or None."""
+    """Try canonical share type first, then compatible fallback pages."""
+    page_types = [preferred_type] if preferred_type else []
+    page_types.extend(
+        page_type
+        for page_type in ("video", "note", "slides")
+        if page_type not in page_types
+    )
     candidates = [
-        f"https://www.iesdouyin.com/share/video/{aweme_id}",
-        f"https://www.iesdouyin.com/share/slides/{aweme_id}",
-        f"https://m.douyin.com/share/video/{aweme_id}",
-        f"https://m.douyin.com/share/slides/{aweme_id}",
+        f"https://{host}/share/{page_type}/{aweme_id}"
+        for host in ("www.iesdouyin.com", "m.douyin.com")
+        for page_type in page_types
     ]
 
     for candidate_url in candidates:
@@ -285,7 +321,11 @@ async def _fetch_and_extract(
             continue
 
         logger.debug("[douyin] 获取页面 %s (%d 字节)", candidate_url, len(html))
-        result = _extract_from_router_data(html, aweme_id)
+        result = _extract_from_router_data(
+            html,
+            aweme_id,
+            preferred_type=preferred_type,
+        )
         if result:
             return result
 
@@ -859,14 +899,18 @@ async def resolve_douyin(
         connector=connector,
     ) as session:
         resolved = await _resolve_short_url(url, session)
-        aweme_id = _extract_aweme_id(resolved)
+        aweme_id, aweme_type = _extract_aweme_ref(resolved)
 
         if not aweme_id:
             logger.warning("[douyin] 无法从重定向 URL 提取 aweme_id：%s", resolved)
             return None
 
         logger.info("[douyin] aweme_id = %s，开始提取内容", aweme_id)
-        result = await _fetch_and_extract(aweme_id, session)
+        result = await _fetch_and_extract(
+            aweme_id,
+            session,
+            preferred_type=aweme_type,
+        )
         if result and comment_count > 0:
             result.comments = await _fetch_hot_comments(
                 session,

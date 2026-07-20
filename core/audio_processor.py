@@ -67,6 +67,13 @@ def _extract_audio_sync(
         ["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(destination)]
     )
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"音频提取失败：{exc.stderr}") from exc

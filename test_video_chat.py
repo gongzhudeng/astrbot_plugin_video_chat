@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402, I001
 
+import json
 import os
 import sys
 import tempfile
@@ -17,6 +18,7 @@ sys.path.insert(0, str(ASTRBOT_DIR))
 
 from core.context_formatter import format_media_work, select_hot_comments
 from core.douyin_resolver import (
+    _extract_from_router_data,
     _fetch_hot_comments,
     _fill_cdp_comment_replies,
     _normalize_cdp_comment_payload,
@@ -711,6 +713,51 @@ class _FakeSession:
 
     def get(self, *args, **kwargs) -> _FakeResponse:
         return self.response
+
+
+class DouyinMediaTypeTests(unittest.TestCase):
+    @staticmethod
+    def _router_html(page_type: str, item: dict) -> str:
+        payload = {
+            "loaderData": {
+                f"{page_type}_(id)/page": {"videoInfoRes": {"item_list": [item]}}
+            }
+        }
+        return f"<script>window._ROUTER_DATA = {json.dumps(payload)}</script>"
+
+    def test_note_prefers_images_when_compatibility_video_exists(self) -> None:
+        item = {
+            "desc": "图文内容",
+            "images": [{"url_list": ["https://example.com/note.jpg"]}],
+            "video": {"play_addr": {"url_list": ["https://example.com/compat.mp4"]}},
+        }
+
+        result = _extract_from_router_data(
+            self._router_html("note", item),
+            "7664179859198843889",
+            preferred_type="note",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.image_urls, ["https://example.com/note.jpg"])
+        self.assertIsNone(result.play_url)
+
+    def test_video_keeps_play_url_when_images_also_exist(self) -> None:
+        item = {
+            "desc": "视频内容",
+            "images": [{"url_list": ["https://example.com/cover.jpg"]}],
+            "video": {"play_addr": {"url_list": ["https://example.com/video.mp4"]}},
+        }
+
+        result = _extract_from_router_data(
+            self._router_html("video", item),
+            "7664179859198843889",
+            preferred_type="video",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.play_url, "https://example.com/video.mp4")
+        self.assertEqual(result.image_urls, [])
 
 
 class DouyinCommentClientTests(unittest.IsolatedAsyncioTestCase):
