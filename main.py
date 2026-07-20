@@ -695,6 +695,21 @@ class VideoChatPlugin(Star):
                 )
         return ""
 
+    def _configured_fallback_ids(
+        self, list_key: str, legacy_keys: tuple[str, ...]
+    ) -> list[str]:
+        if list_key in self.config:
+            configured = self.config.get(list_key)
+            if isinstance(configured, list):
+                return [str(item).strip() for item in configured if str(item).strip()]
+            logger.warning("[video-chat] 回退 Provider 配置不是列表：%s", list_key)
+            return []
+        return [
+            value
+            for key in legacy_keys
+            if (value := str(self.config.get(key, "") or "").strip())
+        ]
+
     def _visual_providers(self, event: AstrMessageEvent) -> list[Provider]:
         providers: list[Provider] = []
         primary_id = str(self.config.get("caption_provider_id", "") or "").strip()
@@ -702,18 +717,28 @@ class VideoChatPlugin(Star):
             provider = self.context.get_provider_by_id(primary_id)
             if isinstance(provider, Provider):
                 providers.append(provider)
+            else:
+                logger.warning(
+                    "[video-chat] 视频转述 Provider 不可用或类型不正确：%s",
+                    primary_id,
+                )
         else:
             session = str(getattr(event, "unified_msg_origin", "") or "")
             provider = self.context.get_using_provider(session)
-            if provider:
+            if isinstance(provider, Provider):
                 providers.append(provider)
-        fallback_id = str(
-            self.config.get("caption_fallback_provider_id", "") or ""
-        ).strip()
-        if fallback_id:
+
+        for fallback_id in self._configured_fallback_ids(
+            "caption_fallback_provider_ids", ("caption_fallback_provider_id",)
+        ):
             provider = self.context.get_provider_by_id(fallback_id)
             if isinstance(provider, Provider):
                 providers.append(provider)
+            else:
+                logger.warning(
+                    "[video-chat] 视频转述回退 Provider 不可用或类型不正确：%s",
+                    fallback_id,
+                )
         return self._deduplicate_providers(providers)
 
     def _stt_providers(self, event: AstrMessageEvent) -> list[STTProvider]:
@@ -723,16 +748,28 @@ class VideoChatPlugin(Star):
             provider = self.context.get_provider_by_id(primary_id)
             if isinstance(provider, STTProvider):
                 providers.append(provider)
+            else:
+                logger.warning(
+                    "[video-chat] STT Provider 不可用或类型不正确：%s",
+                    primary_id,
+                )
         else:
             session = str(getattr(event, "unified_msg_origin", "") or "")
             provider = self.context.get_using_stt_provider(session)
-            if provider:
+            if isinstance(provider, STTProvider):
                 providers.append(provider)
-        fallback_id = str(self.config.get("stt_fallback_provider_id", "") or "").strip()
-        if fallback_id:
+
+        for fallback_id in self._configured_fallback_ids(
+            "stt_fallback_provider_ids", ("stt_fallback_provider_id",)
+        ):
             provider = self.context.get_provider_by_id(fallback_id)
             if isinstance(provider, STTProvider):
                 providers.append(provider)
+            else:
+                logger.warning(
+                    "[video-chat] STT 回退 Provider 不可用或类型不正确：%s",
+                    fallback_id,
+                )
         return self._deduplicate_providers(providers)
 
     @staticmethod

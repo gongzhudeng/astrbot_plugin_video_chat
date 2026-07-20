@@ -81,6 +81,42 @@ class AutoVideoContextTests(unittest.IsolatedAsyncioTestCase):
         plugin.config = config or {}
         return plugin
 
+    def test_ordered_fallback_config_prefers_new_list_and_supports_legacy(self):
+        plugin = self._plugin(
+            {
+                "caption_fallback_provider_ids": ["second", "third"],
+                "caption_fallback_provider_id": "legacy",
+            }
+        )
+        self.assertEqual(
+            plugin._configured_fallback_ids(
+                "caption_fallback_provider_ids",
+                ("caption_fallback_provider_id",),
+            ),
+            ["second", "third"],
+        )
+
+        plugin.config = {
+            "caption_fallback_provider_ids": [],
+            "caption_fallback_provider_id": "legacy",
+        }
+        self.assertEqual(
+            plugin._configured_fallback_ids(
+                "caption_fallback_provider_ids",
+                ("caption_fallback_provider_id",),
+            ),
+            [],
+        )
+
+        plugin.config = {"caption_fallback_provider_id": "legacy"}
+        self.assertEqual(
+            plugin._configured_fallback_ids(
+                "caption_fallback_provider_ids",
+                ("caption_fallback_provider_id",),
+            ),
+            ["legacy"],
+        )
+
     async def test_explicit_link_is_injected_and_tool_is_deduplicated(self) -> None:
         old = {
             "role": "user",

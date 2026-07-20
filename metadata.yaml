@@ -2,7 +2,7 @@ name: astrbot_plugin_video_chat
 display_name: 灵犀 · 视频理解
 author: 灵犀
 desc: 自动理解直发视频与抖音/B站链接，支持字幕/语音、高赞评论回复和视频上下文限额
-version: v2.3.1
+version: v2.4.0
 repo: https://github.com/gongzhudeng/astrbot_plugin_video_chat
 help: |
   发送直发视频或明确的视频链接，AI 会自动解析并根据当前问题回答。
@@ -17,7 +17,8 @@ help: |
   - B 站字幕优先；无字幕时才分析画面并按配置执行 STT
   - 评论按点赞排序，总预算包含一级评论、回复和评论图片描述
   - 评论图片分析默认关闭；开启后批量处理，动图或短视频媒体只取一帧
-  - 视觉模型和 STT 均支持一个兜底 Provider
+  - 视觉模型和 STT 均支持可排序、数量不限的回退 Provider 列表
+  - v2.4.0：将视觉和 STT 的单一兜底升级为有序回退列表
   - 视频上下文默认只保留最新 3 个完整解析详情，旧详情替换为轻量标记
 
   注意：

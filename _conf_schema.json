@@ -45,12 +45,15 @@
     "default": "",
     "_special": "select_provider"
   },
-  "caption_fallback_provider_id": {
-    "type": "string",
-    "description": "视频转述兜底模型",
-    "hint": "首选视频转述模型失败时，自动尝试此模型。",
-    "default": "",
-    "_special": "select_provider"
+  "caption_fallback_provider_ids": {
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "description": "视频转述回退模型列表",
+    "hint": "首选模型失败或返回空内容时，按列表顺序逐个尝试。可添加任意数量并上下调整顺序。",
+    "default": [],
+    "_special": "select_providers"
   },
   "caption_prompt": {
     "type": "text",
@@ -158,12 +161,15 @@
     "default": "",
     "_special": "select_provider_stt"
   },
-  "stt_fallback_provider_id": {
-    "type": "string",
-    "description": "STT 兜底模型",
-    "hint": "首选 STT 模型失败时，自动尝试此模型。",
-    "default": "",
-    "_special": "select_provider_stt"
+  "stt_fallback_provider_ids": {
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "description": "STT 回退模型列表",
+    "hint": "首选 STT 模型失败或返回空内容时，按列表顺序逐个尝试。可添加任意数量并上下调整顺序。",
+    "default": [],
+    "_special": "select_providers_stt"
   },
   "stt_follow_visual_duration": {
     "type": "bool",
