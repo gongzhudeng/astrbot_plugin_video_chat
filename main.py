@@ -459,23 +459,25 @@ class VideoChatPlugin(Star):
         if not result.play_url:
             return work
 
-        work.visual_summary = await self._caption_url_with_fallback(
-            event, result.play_url
-        )
-        if self._stt_enabled():
-            local_video = temp_dir / "douyin_video.mp4"
-            try:
-                await download_media(result.play_url, local_video, max_bytes=max_bytes)
-                work.local_video_path = local_video
+        # Do not send Douyin's remote play_url as a native ``video_url`` part to
+        # the chat provider.  Some OpenAI-compatible providers retain or reuse
+        # native video media state, which can make subsequent main-chat requests
+        # carry tens of thousands of extra prompt tokens.  Materializing the
+        # video locally and sending sampled frames keeps the main conversation
+        # text-only after this hook finishes.
+        local_video = temp_dir / "douyin_video.mp4"
+        try:
+            await download_media(result.play_url, local_video, max_bytes=max_bytes)
+            work.local_video_path = local_video
+            work.visual_summary = await self._caption_frames_with_fallback(
+                event, local_video, first_seconds, ffmpeg_path
+            )
+            if self._stt_enabled():
                 work.transcript = await self._transcribe_with_fallback(
                     event, local_video, temp_dir, first_seconds, ffmpeg_path
                 )
-                if not work.visual_summary:
-                    work.visual_summary = await self._caption_frames_with_fallback(
-                        event, local_video, first_seconds, ffmpeg_path
-                    )
-            except Exception as exc:
-                logger.warning("[video-chat] 抖音媒体下载失败：%s", exc)
+        except Exception as exc:
+            logger.warning("[video-chat] 抖音媒体下载或抽帧失败：%s", exc)
         return work
 
     async def _analyze_generic(

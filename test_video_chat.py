@@ -18,6 +18,7 @@ sys.path.insert(0, str(ASTRBOT_DIR))
 
 from core.context_formatter import format_media_work, select_hot_comments
 from core.douyin_resolver import (
+    DouyinResult,
     _extract_from_router_data,
     _fetch_hot_comments,
     _fill_cdp_comment_replies,
@@ -138,6 +139,52 @@ class AutoVideoContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.get_extra("video_chat_processed_source"), normalized_url)
         self.assertIn("当前请求已自动解析一个视频", duplicate_result)
         plugin._do_analyze.assert_awaited_once_with(event, normalized_url)
+
+    async def test_douyin_video_uses_local_frames_instead_of_native_video_url(self):
+        plugin = self._plugin()
+        event = _FakeVideoEvent()
+        resolved = DouyinResult(play_url="https://cdn.example/video.mp4")
+        temp_dir = Path(tempfile.mkdtemp())
+        try:
+            with (
+                patch(
+                    "astrbot_plugin_video_chat.main.resolve_douyin",
+                    new=AsyncMock(return_value=resolved),
+                ),
+                patch(
+                    "astrbot_plugin_video_chat.main.download_media",
+                    new=AsyncMock(),
+                ) as download_media,
+                patch.object(
+                    plugin,
+                    "_caption_frames_with_fallback",
+                    new=AsyncMock(return_value="frame summary"),
+                ) as caption_frames,
+                patch.object(
+                    plugin,
+                    "_caption_url_with_fallback",
+                    new=AsyncMock(),
+                ) as caption_url,
+            ):
+                work = await plugin._analyze_douyin(
+                    event,
+                    "https://v.douyin.com/example/",
+                    temp_dir,
+                    0,
+                    0,
+                    120,
+                    "",
+                    1024,
+                )
+
+        finally:
+            temp_dir.rmdir()
+
+        download_media.assert_awaited_once()
+        caption_frames.assert_awaited_once()
+        caption_url.assert_not_awaited()
+        self.assertEqual(work.visual_summary, "frame summary")
+        self.assertEqual(work.local_video_path, temp_dir / "douyin_video.mp4")
 
     async def test_direct_video_has_priority_and_removes_only_direct_placeholder(
         self,
