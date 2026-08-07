@@ -118,6 +118,34 @@
     },
     "default": 120
   },
+  "image_preprocess_enabled": {
+    "type": "bool",
+    "description": "启用图片预处理压缩",
+    "hint": "仅影响发给视觉模型的图文图片、评论图片和本地视频帧，不修改原始媒体。默认关闭。",
+    "default": false
+  },
+  "image_preprocess_max_size": {
+    "type": "int",
+    "description": "图片预处理最长边（像素）",
+    "hint": "开启预处理后，图片和视频帧超过此最长边时按比例缩小。",
+    "slider": {
+      "min": 256,
+      "max": 4096,
+      "step": 64
+    },
+    "default": 1280
+  },
+  "image_preprocess_quality": {
+    "type": "int",
+    "description": "图片预处理 JPEG 质量",
+    "hint": "范围 50-100。字幕、小字或票据画面建议使用较高质量。",
+    "slider": {
+      "min": 50,
+      "max": 100,
+      "step": 5
+    },
+    "default": 85
+  },
   "ffmpeg_path": {
     "type": "string",
     "description": "ffmpeg 路径",

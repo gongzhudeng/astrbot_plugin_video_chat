@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402, I001
 
+import io
 import json
 import os
 import sys
@@ -37,7 +38,13 @@ from core.media_input import (
     resolve_direct_video,
 )
 from core.models import HotComment, MediaWork
-from core.video_captioner import build_comment_media_prompt
+from core.video_captioner import (
+    _frame_filter,
+    _image_mime,
+    _jpeg_qscale,
+    build_comment_media_prompt,
+)
+from core.image_preprocess import prepare_image_bytes
 from core.video_context import (
     VIDEO_CONTEXT_PRUNED,
     prune_video_contexts,
@@ -73,6 +80,65 @@ class _FakeProviderRequest:
         self.prompt = prompt
         self.contexts = contexts or []
         self.extra_user_content_parts = extra_user_content_parts or []
+
+
+class ImagePreprocessTests(unittest.TestCase):
+    @staticmethod
+    def _encode_image(
+        size: tuple[int, int],
+        *,
+        mode: str = "RGB",
+        color="white",
+        image_format: str = "PNG",
+    ) -> bytes:
+        from PIL import Image
+
+        image = Image.new(mode, size, color)
+        output = io.BytesIO()
+        image.save(output, format=image_format)
+        return output.getvalue()
+
+    def test_large_image_resizes_and_small_image_is_not_upscaled(self) -> None:
+        from PIL import Image
+
+        large = self._encode_image((2400, 1200))
+        prepared = prepare_image_bytes(large, max_size=1280, quality=85)
+        with Image.open(io.BytesIO(prepared)) as image:
+            self.assertEqual(image.size, (1280, 640))
+
+        small = self._encode_image((640, 320))
+        self.assertEqual(
+            prepare_image_bytes(small, max_size=1280, quality=85),
+            small,
+        )
+        self.assertEqual(_image_mime(small), "image/png")
+
+    def test_transparent_png_becomes_jpeg_with_white_background(self) -> None:
+        from PIL import Image
+
+        transparent = self._encode_image(
+            (1600, 800),
+            mode="RGBA",
+            color=(0, 0, 0, 0),
+        )
+        prepared = prepare_image_bytes(transparent, max_size=1280, quality=85)
+
+        self.assertEqual(_image_mime(prepared), "image/jpeg")
+        with Image.open(io.BytesIO(prepared)) as image:
+            pixel = image.convert("RGB").getpixel((0, 0))
+        self.assertTrue(all(channel >= 245 for channel in pixel))
+
+    def test_ffmpeg_defaults_are_unchanged_when_disabled(self) -> None:
+        self.assertEqual(_frame_filter("1.000000", 0), "fps=1.000000")
+        self.assertEqual(_jpeg_qscale(0, 85), 5)
+
+    def test_ffmpeg_preprocess_only_downscales_and_maps_quality(self) -> None:
+        frame_filter = _frame_filter("1.000000", 1280)
+
+        self.assertIn("scale=w=min(1280\\,iw):h=min(1280\\,ih)", frame_filter)
+        self.assertIn("force_original_aspect_ratio=decrease", frame_filter)
+        self.assertEqual(_jpeg_qscale(1280, 85), 6)
+        self.assertLess(_jpeg_qscale(1280, 95), _jpeg_qscale(1280, 75))
 
 
 class AutoVideoContextTests(unittest.IsolatedAsyncioTestCase):

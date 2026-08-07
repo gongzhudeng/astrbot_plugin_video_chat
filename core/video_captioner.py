@@ -11,6 +11,8 @@ from pathlib import Path
 
 from astrbot import logger
 
+from .image_preprocess import prepare_image_bytes
+
 DEFAULT_CAPTION_PROMPT = (
     "请用不超过 300 字简洁概括这个视频的核心内容，"
     "包括主要人物、事件和关键信息。"
@@ -67,12 +69,29 @@ async def caption_from_url(
     return text
 
 
-def _to_jpeg_bytes(data: bytes) -> bytes | None:
-    """Convert raw image bytes to JPEG using Pillow.
+def _to_jpeg_bytes(
+    data: bytes,
+    *,
+    max_size: int = 1280,
+    quality: int = 85,
+    preprocess_enabled: bool = False,
+) -> bytes | None:
+    """Convert image bytes to the JPEG payload used by vision requests."""
+    if preprocess_enabled:
+        prepared = prepare_image_bytes(
+            data,
+            max_size=max_size,
+            quality=quality,
+        )
+        if (
+            prepared[:3] == b"\xff\xd8\xff"
+            or prepared[:8] == b"\x89PNG\r\n\x1a\n"
+            or prepared[:6] in (b"GIF87a", b"GIF89a")
+            or (prepared[:4] == b"RIFF" and prepared[8:12] == b"WEBP")
+            or prepared[:2] == b"BM"
+        ):
+            return prepared
 
-    Returns JPEG bytes, or None if conversion fails (unsupported format).
-    Falls back to returning the original data if it already looks like JPEG/PNG/GIF/WEBP/BMP.
-    """
     try:
         import io
 
@@ -87,18 +106,18 @@ def _to_jpeg_bytes(data: bytes) -> bytes | None:
     except Exception:
         pass
 
-    # Pillow not available or unsupported — accept only known-safe formats by magic bytes
+    # Keep already-supported source formats when Pillow cannot decode them.
     if data[:3] == b"\xff\xd8\xff":
-        return data  # JPEG
+        return data
     if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return data  # PNG
+        return data
     if data[:6] in (b"GIF87a", b"GIF89a"):
-        return data  # GIF
+        return data
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return data  # WEBP
+        return data
     if data[:2] == b"BM":
-        return data  # BMP
-    return None  # Skip AVIF/HEIC/unknown
+        return data
+    return None
 
 
 async def caption_from_image_urls(
@@ -107,6 +126,9 @@ async def caption_from_image_urls(
     provider: object,
     prompt: str = DEFAULT_CAPTION_PROMPT,
     max_images: int = 9,
+    preprocess_enabled: bool = False,
+    preprocess_max_size: int = 1280,
+    preprocess_quality: int = 85,
 ) -> str:
     """Download image URLs, encode to base64, and ask the vision model to caption them.
 
@@ -131,22 +153,17 @@ async def caption_from_image_urls(
                     img_url, timeout=aiohttp.ClientTimeout(total=20)
                 ) as resp:
                     raw = await resp.read()
-                # Convert to JPEG (handles AVIF/HEIC/unknown formats via Pillow)
-                converted = _to_jpeg_bytes(raw)
+                # Convert to JPEG and optionally resize large images.
+                converted = _to_jpeg_bytes(
+                    raw,
+                    max_size=preprocess_max_size,
+                    quality=preprocess_quality,
+                    preprocess_enabled=preprocess_enabled,
+                )
                 if converted is None:
                     logger.warning("[video-chat] 跳过不支持的图片格式 %s", img_url[:80])
                     continue
-                # Determine MIME type from converted bytes
-                if converted[:3] == b"\xff\xd8\xff":
-                    mime = "image/jpeg"
-                elif converted[:8] == b"\x89PNG\r\n\x1a\n":
-                    mime = "image/png"
-                elif converted[:6] in (b"GIF87a", b"GIF89a"):
-                    mime = "image/gif"
-                elif converted[:4] == b"RIFF" and converted[8:12] == b"WEBP":
-                    mime = "image/webp"
-                else:
-                    mime = "image/jpeg"
+                mime = _image_mime(converted)
                 payload = base64.b64encode(converted).decode("utf-8")
                 image_blocks.append(
                     {
@@ -201,6 +218,20 @@ def _guess_media_suffix(data: bytes, content_type: str = "") -> str:
     return ".bin"
 
 
+def _image_mime(data: bytes) -> str:
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:2] == b"BM":
+        return "image/bmp"
+    return "image/jpeg"
+
+
 def _split_frame_budget(total_frames: int, item_count: int) -> list[int]:
     item_count = max(1, item_count)
     total_frames = max(1, total_frames)
@@ -219,6 +250,9 @@ async def caption_from_media_urls(
     max_frames: int = 30,
     analyze_first_seconds: int = 120,
     ffmpeg_path: str = "",
+    preprocess_enabled: bool = False,
+    preprocess_max_size: int = 1280,
+    preprocess_quality: int = 85,
 ) -> str:
     """Caption mixed image/animated media URLs using one shared frame budget."""
     import aiohttp
@@ -270,18 +304,25 @@ async def caption_from_media_urls(
                     budget,
                     analyze_first_seconds,
                     ffmpeg_path,
+                    preprocess_max_size if preprocess_enabled else 0,
+                    preprocess_quality,
                 )
                 frame_data_urls.extend(extracted[: max_frames - len(frame_data_urls)])
                 continue
             except RuntimeError:
                 pass
 
-            converted = _to_jpeg_bytes(media_path.read_bytes())
+            converted = _to_jpeg_bytes(
+                media_path.read_bytes(),
+                max_size=preprocess_max_size,
+                quality=preprocess_quality,
+                preprocess_enabled=preprocess_enabled,
+            )
             if converted is None:
                 logger.warning("[video-chat] 跳过不支持的图文素材：%s", media_path.name)
                 continue
             payload = base64.b64encode(converted).decode("utf-8")
-            frame_data_urls.append(f"data:image/jpeg;base64,{payload}")
+            frame_data_urls.append(f"data:{_image_mime(converted)};base64,{payload}")
 
     if not frame_data_urls:
         raise RuntimeError("图文素材无法抽帧或转为图片")
@@ -327,6 +368,9 @@ async def caption_comment_media(
     prompt: str = DEFAULT_COMMENT_MEDIA_PROMPT,
     max_media: int = 6,
     ffmpeg_path: str = "",
+    preprocess_enabled: bool = False,
+    preprocess_max_size: int = 1280,
+    preprocess_quality: int = 85,
 ) -> dict[str, str]:
     """Describe numbered comment media in one model request."""
     import aiohttp
@@ -353,7 +397,12 @@ async def caption_comment_media(
                         suffix = _guess_media_suffix(
                             raw, response.headers.get("Content-Type", "")
                         )
-                    converted = _to_jpeg_bytes(raw)
+                    converted = _to_jpeg_bytes(
+                        raw,
+                        max_size=preprocess_max_size,
+                        quality=preprocess_quality,
+                        preprocess_enabled=preprocess_enabled,
+                    )
                     if converted is None and suffix == ".mp4":
                         path = Path(tmpdir) / f"comment_{index:03d}.mp4"
                         path.write_bytes(raw)
@@ -365,11 +414,13 @@ async def caption_comment_media(
                             1,
                             1,
                             ffmpeg_path,
+                            preprocess_max_size if preprocess_enabled else 0,
+                            preprocess_quality,
                         )
                         data_url = frames[0]
                     elif converted is not None:
                         payload = base64.b64encode(converted).decode("utf-8")
-                        data_url = f"data:image/jpeg;base64,{payload}"
+                        data_url = f"data:{_image_mime(converted)};base64,{payload}"
                     else:
                         logger.warning(
                             "[video-chat] 跳过不支持的评论媒体：%s", media_url[:80]
@@ -426,6 +477,8 @@ async def caption_from_frames(
     max_frames: int = 30,
     analyze_first_seconds: int = 120,
     ffmpeg_path: str = "",
+    preprocess_max_size: int = 0,
+    preprocess_quality: int = 85,
 ) -> str:
     """Extract frames with ffmpeg and ask the vision model to caption them.
 
@@ -439,6 +492,8 @@ async def caption_from_frames(
         max_frames,
         analyze_first_seconds,
         ffmpeg_path,
+        preprocess_max_size,
+        preprocess_quality,
     )
 
     image_blocks = [
@@ -475,12 +530,32 @@ async def caption_from_frames(
 # ---------------------------------------------------------------------------
 
 
+def _frame_filter(fps_expr: str, preprocess_max_size: int) -> str:
+    if preprocess_max_size <= 0:
+        return f"fps={fps_expr}"
+    return (
+        f"fps={fps_expr},"
+        f"scale=w=min({preprocess_max_size}\\,iw):"
+        f"h=min({preprocess_max_size}\\,ih):"
+        "force_original_aspect_ratio=decrease"
+    )
+
+
+def _jpeg_qscale(preprocess_max_size: int, preprocess_quality: int) -> int:
+    if preprocess_max_size <= 0:
+        return 5
+    quality = min(100, max(50, int(preprocess_quality)))
+    return min(16, max(2, round(17 - (quality - 50) * 15 / 50)))
+
+
 def _extract_frames_sync(
     local_path: Path,
     frames_per_second: float,
     max_frames: int,
     analyze_first_seconds: int,
     ffmpeg_path: str,
+    preprocess_max_size: int = 0,
+    preprocess_quality: int = 85,
 ) -> list[str]:
     """Extract frames using fps-rate + window + cap strategy, return as data URLs.
 
@@ -532,11 +607,11 @@ def _extract_frames_sync(
             "-i",
             str(local_path),
             "-vf",
-            f"fps={fps_expr}",
+            _frame_filter(fps_expr, preprocess_max_size),
             "-frames:v",
             str(actual_count),
             "-q:v",
-            "5",
+            str(_jpeg_qscale(preprocess_max_size, preprocess_quality)),
             out_pattern,
         ]
         try:

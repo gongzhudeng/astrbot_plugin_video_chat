@@ -74,7 +74,7 @@ class AnalysisOptions:
     "灵犀 · 视频理解",
     "灵犀",
     "自动理解直发视频与抖音/B站链接，并限制历史中的完整视频解析数量",
-    "2.3.0",
+    "2.5.0",
     "https://github.com/gongzhudeng/astrbot_plugin_video_chat",
 )
 class VideoChatPlugin(Star):
@@ -521,6 +521,17 @@ class VideoChatPlugin(Star):
             if source is not None:
                 source.cleanup()
 
+    def _image_preprocess_options(self) -> tuple[bool, int, int]:
+        enabled = bool(self.config.get("image_preprocess_enabled", False))
+        max_size = max(
+            256, int(self.config.get("image_preprocess_max_size", 1280) or 1280)
+        )
+        quality = min(
+            100,
+            max(50, int(self.config.get("image_preprocess_quality", 85) or 85)),
+        )
+        return enabled, max_size, quality
+
     async def _caption_comment_media_if_enabled(
         self,
         event: AstrMessageEvent,
@@ -562,6 +573,9 @@ class VideoChatPlugin(Star):
         if not media_items:
             return
 
+        preprocess_enabled, preprocess_max_size, preprocess_quality = (
+            self._image_preprocess_options()
+        )
         descriptions: dict[str, str] = {}
         for provider in self._visual_providers(event):
             try:
@@ -571,6 +585,9 @@ class VideoChatPlugin(Star):
                     prompt=self._comment_media_caption_prompt(),
                     max_media=max_media,
                     ffmpeg_path=ffmpeg_path,
+                    preprocess_enabled=preprocess_enabled,
+                    preprocess_max_size=preprocess_max_size,
+                    preprocess_quality=preprocess_quality,
                 )
                 if descriptions:
                     break
@@ -604,6 +621,9 @@ class VideoChatPlugin(Star):
         first_seconds: int,
         ffmpeg_path: str,
     ) -> str:
+        preprocess_enabled, preprocess_max_size, preprocess_quality = (
+            self._image_preprocess_options()
+        )
         return await self._try_visual_providers(
             event,
             lambda provider: caption_from_frames(
@@ -616,6 +636,8 @@ class VideoChatPlugin(Star):
                 max_frames=max(1, int(self.config.get("max_frames", 30) or 30)),
                 analyze_first_seconds=first_seconds,
                 ffmpeg_path=ffmpeg_path,
+                preprocess_max_size=(preprocess_max_size if preprocess_enabled else 0),
+                preprocess_quality=preprocess_quality,
             ),
         )
 
@@ -626,6 +648,9 @@ class VideoChatPlugin(Star):
         first_seconds: int,
         ffmpeg_path: str,
     ) -> str:
+        preprocess_enabled, preprocess_max_size, preprocess_quality = (
+            self._image_preprocess_options()
+        )
         return await self._try_visual_providers(
             event,
             lambda provider: caption_from_media_urls(
@@ -639,6 +664,9 @@ class VideoChatPlugin(Star):
                 max_frames=max(1, int(self.config.get("max_frames", 30) or 30)),
                 analyze_first_seconds=first_seconds,
                 ffmpeg_path=ffmpeg_path,
+                preprocess_enabled=preprocess_enabled,
+                preprocess_max_size=preprocess_max_size,
+                preprocess_quality=preprocess_quality,
             ),
         )
 
