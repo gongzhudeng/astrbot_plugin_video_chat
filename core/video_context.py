@@ -32,9 +32,6 @@ def prune_video_contexts(
     max_details: int,
     incoming_details: int = 0,
 ) -> int:
-    if max_details <= 0:
-        return 0
-
     keep_history = max(0, max_details - max(0, incoming_details))
     locations: list[tuple[Any, int | None, int, int]] = []
     for message in contexts:

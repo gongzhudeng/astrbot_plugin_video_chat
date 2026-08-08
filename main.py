@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import re
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -74,7 +77,7 @@ class AnalysisOptions:
     "灵犀 · 视频理解",
     "灵犀",
     "自动理解直发视频与抖音/B站链接，并限制历史中的完整视频解析数量",
-    "2.5.0",
+    "2.6.0",
     "https://github.com/gongzhudeng/astrbot_plugin_video_chat",
 )
 class VideoChatPlugin(Star):
@@ -116,14 +119,16 @@ class VideoChatPlugin(Star):
         req: ProviderRequest,
     ) -> None:
         if not bool(self.config.get("auto_parse_video_messages", True)):
-            self._prune_request_video_contexts(req, incoming_details=0)
+            pruned = self._prune_request_video_contexts(req, incoming_details=0)
+            await self._persist_request_history(event, req, pruned=pruned)
             return
 
         direct_videos = extract_direct_video_references(event)
         direct_video = direct_videos[0] if direct_videos else None
         clean_url = self._extract_supported_message_url(event)
         if direct_video is None and not clean_url:
-            self._prune_request_video_contexts(req, incoming_details=0)
+            pruned = self._prune_request_video_contexts(req, incoming_details=0)
+            await self._persist_request_history(event, req, pruned=pruned)
             return
 
         event.set_extra("video_chat_user_context", self._video_user_context(req.prompt))
@@ -140,17 +145,18 @@ class VideoChatPlugin(Star):
             source_key = clean_url
 
         if not result.strip() or _is_analysis_failure(result):
-            self._prune_request_video_contexts(req, incoming_details=0)
+            pruned = self._prune_request_video_contexts(req, incoming_details=0)
+            await self._persist_request_history(event, req, pruned=pruned)
             if result.strip():
                 req.extra_user_content_parts.append(TextPart(text=result.strip()))
             return
-        self._prune_request_video_contexts(req, incoming_details=1)
+
+        limit = self._video_context_limit()
+        pruned = self._prune_request_video_contexts(req, incoming_details=1)
         if direct_video is not None:
             req.extra_user_content_parts = remove_direct_video_attachment_parts(
                 list(req.extra_user_content_parts or [])
             )
-        req.extra_user_content_parts.append(TextPart(text=wrap_video_context(result)))
-        event.set_extra("video_chat_processed_source", source_key)
         prompt = str(req.prompt or "").strip()
         if (
             not prompt
@@ -158,6 +164,83 @@ class VideoChatPlugin(Star):
             or ATTACHMENT_ONLY_VIDEO_PATTERN.fullmatch(prompt)
         ):
             req.prompt = DEFAULT_DIRECT_VIDEO_QUESTION
+
+        video_context = wrap_video_context(result)
+        context_part = TextPart(text=video_context)
+        if limit == 0:
+            context_part.mark_as_temp()
+        req.extra_user_content_parts.append(context_part)
+        event.set_extra("video_chat_processed_source", source_key)
+        details_hash = hashlib.sha256(result.encode("utf-8")).hexdigest()[:12]
+        logger.info(
+            "[video-chat] 视频解析已组装：source=%s mode=%s details_chars=%d "
+            "details_hash=%s request_has_video_context=true",
+            source_key,
+            "temporary" if limit == 0 else "persistent",
+            len(result),
+            details_hash,
+        )
+        await self._persist_request_history(
+            event,
+            req,
+            pruned=pruned,
+            include_current_user=True,
+            current_video_context=video_context if limit > 0 else None,
+        )
+
+    @filter.command("清理视频上下文")
+    async def cmd_clear_video_context(self, event: AstrMessageEvent) -> None:
+        """清理当前会话历史中的完整视频解析详情。"""
+        manager = getattr(getattr(self, "context", None), "conversation_manager", None)
+        if manager is None:
+            yield event.plain_result("当前会话管理器不可用，未能清理视频上下文。")
+            return
+
+        try:
+            conversation_id = await manager.get_curr_conversation_id(
+                event.unified_msg_origin
+            )
+            conversation = (
+                await manager.get_conversation(
+                    event.unified_msg_origin,
+                    conversation_id,
+                )
+                if conversation_id
+                else None
+            )
+        except Exception as exc:
+            logger.warning("[video-chat] 获取当前会话失败：%s", exc)
+            yield event.plain_result("获取当前会话失败，未能清理视频上下文。")
+            return
+
+        if conversation is None:
+            yield event.plain_result("当前没有可清理的会话历史。")
+            return
+
+        try:
+            history = json.loads(getattr(conversation, "history", "[]") or "[]")
+            if not isinstance(history, list):
+                history = []
+        except (TypeError, ValueError):
+            history = []
+        pruned = prune_video_contexts(history, max_details=0)
+        if not pruned:
+            yield event.plain_result("当前会话没有完整视频解析详情。")
+            return
+
+        try:
+            await manager.update_conversation(
+                event.unified_msg_origin,
+                conversation.cid,
+                history=history,
+            )
+            conversation.history = json.dumps(history, ensure_ascii=False)
+        except Exception as exc:
+            logger.warning("[video-chat] 手动清理视频上下文失败：%s", exc)
+            yield event.plain_result("清理视频上下文失败，请稍后重试。")
+            return
+
+        yield event.plain_result(f"已清理 {pruned} 个完整视频解析详情。")
 
     @filter.command("视频")
     async def cmd_video(self, event: AstrMessageEvent) -> None:
@@ -344,20 +427,76 @@ class VideoChatPlugin(Star):
             return clean_url
         return None
 
+    def _video_context_limit(self) -> int:
+        return max(0, int(self.config.get("max_video_context_details", 3) or 0))
+
     def _prune_request_video_contexts(
         self,
         req: ProviderRequest,
         *,
         incoming_details: int,
-    ) -> None:
-        limit = max(0, int(self.config.get("max_video_context_details", 3) or 0))
+    ) -> int:
         pruned = prune_video_contexts(
             list(req.contexts or []),
-            max_details=limit,
+            max_details=self._video_context_limit(),
             incoming_details=incoming_details,
         )
         if pruned:
             logger.info("[video-chat] 已清理 %d 个旧视频解析上下文", pruned)
+        return pruned
+
+    async def _persist_request_history(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+        *,
+        pruned: int,
+        include_current_user: bool = False,
+        current_video_context: str | None = None,
+    ) -> None:
+        if not pruned and not include_current_user:
+            return
+
+        conversation = getattr(req, "conversation", None)
+        manager = getattr(getattr(self, "context", None), "conversation_manager", None)
+        conversation_id = getattr(conversation, "cid", None)
+        if manager is None or not conversation_id:
+            return
+
+        history = copy.deepcopy(list(req.contexts or []))
+        if include_current_user:
+            content: list[dict[str, str]] = []
+            prompt = str(req.prompt or "").strip()
+            if prompt:
+                content.append({"type": "text", "text": prompt})
+            if current_video_context:
+                content.append({"type": "text", "text": current_video_context})
+            if content:
+                history.append({"role": "user", "content": content})
+
+        history_text = json.dumps(history, ensure_ascii=False)
+        marker_count = history_text.count("astrbot-video-chat:context:v1:start")
+        try:
+            await manager.update_conversation(
+                event.unified_msg_origin,
+                conversation_id,
+                history=history,
+            )
+        except Exception as exc:
+            logger.warning("[video-chat] 视频上下文历史写入失败：%s", exc)
+            return
+
+        try:
+            conversation.history = history_text
+        except Exception:
+            pass
+        logger.info(
+            "[video-chat] 视频上下文历史已更新：pruned=%d "
+            "history_video_contexts=%d current_user_saved=%s",
+            pruned,
+            marker_count,
+            include_current_user,
+        )
 
     async def _analyze_bilibili(
         self,

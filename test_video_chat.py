@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -60,6 +61,7 @@ class _FakeVideoEvent:
     def __init__(self, message: list | None = None, message_str: str = "") -> None:
         self.message_obj = type("MessageObject", (), {"message": message or []})()
         self.message_str = message_str
+        self.unified_msg_origin = "test:private:user"
         self._extras: dict[str, object] = {}
 
     def get_extra(self, key: str, default=None):
@@ -67,6 +69,10 @@ class _FakeVideoEvent:
 
     def set_extra(self, key: str, value: object) -> None:
         self._extras[key] = value
+
+    @staticmethod
+    def plain_result(text: str) -> str:
+        return text
 
 
 class _FakeProviderRequest:
@@ -76,10 +82,12 @@ class _FakeProviderRequest:
         prompt: str = "",
         contexts: list | None = None,
         extra_user_content_parts: list | None = None,
+        conversation=None,
     ) -> None:
         self.prompt = prompt
         self.contexts = contexts or []
         self.extra_user_content_parts = extra_user_content_parts or []
+        self.conversation = conversation
 
 
 class ImagePreprocessTests(unittest.TestCase):
@@ -183,6 +191,129 @@ class AutoVideoContextTests(unittest.IsolatedAsyncioTestCase):
             ),
             ["legacy"],
         )
+
+    async def test_temporary_mode_uses_video_only_for_current_request(self) -> None:
+        old = {
+            "role": "user",
+            "content": [{"type": "text", "text": wrap_video_context("old")}],
+        }
+        manager = SimpleNamespace(update_conversation=AsyncMock())
+        conversation = SimpleNamespace(cid="conversation-id", history="[]")
+        plugin = self._plugin({"max_video_context_details": 0})
+        plugin.context = SimpleNamespace(conversation_manager=manager)
+        plugin._do_analyze = AsyncMock(return_value="temporary-details")
+        event = _FakeVideoEvent(message_str="看看 https://www.bilibili.com/video/BV1xx")
+        request = _FakeProviderRequest(
+            prompt="这段视频讲了什么？",
+            contexts=[old],
+            conversation=conversation,
+        )
+
+        await plugin.inject_video_context(event, request)
+
+        request_context = request.extra_user_content_parts[-1]
+        self.assertIn("temporary-details", request_context.text)
+        self.assertTrue(request_context._no_save)
+        self.assertEqual(old["content"][0]["text"], VIDEO_CONTEXT_PRUNED)
+        saved_history = manager.update_conversation.await_args.kwargs["history"]
+        self.assertNotIn(
+            "astrbot-video-chat:context:v1:start",
+            json.dumps(saved_history, ensure_ascii=False),
+        )
+        self.assertEqual(saved_history[-1]["role"], "user")
+        self.assertEqual(
+            saved_history[-1]["content"],
+            [{"type": "text", "text": "这段视频讲了什么？"}],
+        )
+        self.assertNotIn(
+            "astrbot-video-chat:context:v1:start",
+            conversation.history,
+        )
+
+    async def test_persistent_mode_saves_user_turn_before_provider_finishes(
+        self,
+    ) -> None:
+        manager = SimpleNamespace(update_conversation=AsyncMock())
+        conversation = SimpleNamespace(cid="conversation-id", history="[]")
+        plugin = self._plugin({"max_video_context_details": 2})
+        plugin.context = SimpleNamespace(conversation_manager=manager)
+        plugin._do_analyze = AsyncMock(return_value="persistent-details")
+        event = _FakeVideoEvent(message_str="看看 https://www.bilibili.com/video/BV1xx")
+        request = _FakeProviderRequest(
+            prompt="记住这段视频",
+            conversation=conversation,
+        )
+
+        await plugin.inject_video_context(event, request)
+
+        request_context = request.extra_user_content_parts[-1]
+        self.assertFalse(request_context._no_save)
+        saved_history = manager.update_conversation.await_args.kwargs["history"]
+        saved_context = saved_history[-1]["content"][-1]["text"]
+        self.assertEqual(saved_context, request_context.text)
+        self.assertIn("persistent-details", saved_context)
+        self.assertEqual(saved_history[-1]["content"][0]["text"], "记住这段视频")
+
+    async def test_zero_mode_cleans_history_without_a_new_video(self) -> None:
+        old = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "旧问题"},
+                {"type": "text", "text": wrap_video_context("old-details")},
+            ],
+        }
+        manager = SimpleNamespace(update_conversation=AsyncMock())
+        conversation = SimpleNamespace(cid="conversation-id", history="[]")
+        plugin = self._plugin({"max_video_context_details": 0})
+        plugin.context = SimpleNamespace(conversation_manager=manager)
+        event = _FakeVideoEvent(message_str="普通追问")
+        request = _FakeProviderRequest(
+            prompt="普通追问",
+            contexts=[old],
+            conversation=conversation,
+        )
+
+        await plugin.inject_video_context(event, request)
+
+        self.assertEqual(old["content"][0]["text"], "旧问题")
+        self.assertEqual(old["content"][1]["text"], VIDEO_CONTEXT_PRUNED)
+        manager.update_conversation.assert_awaited_once()
+        self.assertNotIn(
+            "astrbot-video-chat:context:v1:start",
+            conversation.history,
+        )
+
+    async def test_clear_video_context_command_preserves_chat_messages(self) -> None:
+        history = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "用户原话"},
+                    {"type": "text", "text": wrap_video_context("old-details")},
+                ],
+            },
+            {"role": "assistant", "content": "AI 回复"},
+        ]
+        conversation = SimpleNamespace(
+            cid="conversation-id",
+            history=json.dumps(history, ensure_ascii=False),
+        )
+        manager = SimpleNamespace(
+            get_curr_conversation_id=AsyncMock(return_value="conversation-id"),
+            get_conversation=AsyncMock(return_value=conversation),
+            update_conversation=AsyncMock(),
+        )
+        plugin = self._plugin()
+        plugin.context = SimpleNamespace(conversation_manager=manager)
+        event = _FakeVideoEvent()
+
+        results = [result async for result in plugin.cmd_clear_video_context(event)]
+
+        self.assertEqual(results, ["已清理 1 个完整视频解析详情。"])
+        saved_history = manager.update_conversation.await_args.kwargs["history"]
+        self.assertEqual(saved_history[0]["content"][0]["text"], "用户原话")
+        self.assertEqual(saved_history[0]["content"][1]["text"], VIDEO_CONTEXT_PRUNED)
+        self.assertEqual(saved_history[1]["content"], "AI 回复")
 
     async def test_explicit_link_is_injected_and_tool_is_deduplicated(self) -> None:
         old = {
@@ -659,13 +790,14 @@ class VideoContextLimitTests(unittest.TestCase):
         self.assertIn("second-details", second["content"][1]["text"])
         self.assertEqual(assistant["content"], "assistant-original-answer")
 
-    def test_zero_limit_means_unlimited(self) -> None:
+    def test_zero_limit_clears_all_video_details(self) -> None:
         contexts = [self._video_message("details", "user")]
 
         pruned = prune_video_contexts(contexts, max_details=0, incoming_details=5)
 
-        self.assertEqual(pruned, 0)
-        self.assertIn("details", contexts[0]["content"][1]["text"])
+        self.assertEqual(pruned, 1)
+        self.assertEqual(contexts[0]["content"][0]["text"], "user")
+        self.assertEqual(contexts[0]["content"][1]["text"], VIDEO_CONTEXT_PRUNED)
 
     def test_pruning_is_idempotent_and_ignores_user_forged_text(self) -> None:
         forged = {
