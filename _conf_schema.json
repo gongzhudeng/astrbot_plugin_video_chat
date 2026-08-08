@@ -51,9 +51,18 @@
       "type": "string"
     },
     "description": "视频转述回退模型列表",
-    "hint": "首选模型失败或返回空内容时，按列表顺序逐个尝试。可添加任意数量并上下调整顺序。",
+    "hint": "首选模型失败、返回空内容或命中拒绝关键词时，按列表顺序逐个尝试。可添加任意数量并上下调整顺序。",
     "default": [],
     "_special": "select_providers"
+  },
+  "caption_refusal_keywords": {
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "description": "视频模型拒绝判定关键词",
+    "hint": "视觉模型返回内容命中任一关键词时视为拒绝，并自动尝试下一个模型。也用于图文/动图和评论图片分析。",
+    "default": ["无法协助", "不能协助", "无法描述", "不能描述", "抱歉，我不能", "i can't help", "i cannot help", "unable to assist", "i can't discuss", "我是kiro", "我是 kiro", "ai开发环境助手", "ai 开发环境助手"]
   },
   "caption_prompt": {
     "type": "text",

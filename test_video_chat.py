@@ -44,6 +44,7 @@ from core.video_captioner import (
     _image_mime,
     _jpeg_qscale,
     build_comment_media_prompt,
+    validate_vision_response,
 )
 from core.image_preprocess import prepare_image_bytes
 from core.video_context import (
@@ -191,6 +192,69 @@ class AutoVideoContextTests(unittest.IsolatedAsyncioTestCase):
             ),
             ["legacy"],
         )
+
+    async def test_visual_provider_fallback_skips_empty_error_and_refusal(self):
+        plugin = self._plugin(
+            {
+                "caption_refusal_keywords": ["i can't discuss", "我是kiro"],
+            }
+        )
+        providers = [object(), object(), object(), object()]
+        plugin._visual_providers = lambda event: providers
+        results = iter(
+            [
+                "   ",
+                RuntimeError("provider unavailable"),
+                "I can't discuss that.",
+                "画面中有人正在晾衣服。",
+            ]
+        )
+        calls: list[object] = []
+
+        async def operation(provider):
+            calls.append(provider)
+            result = next(results)
+            if isinstance(result, Exception):
+                raise result
+            response = SimpleNamespace(completion_text=result)
+            return validate_vision_response(
+                response,
+                refusal_keywords=plugin._visual_refusal_keywords(),
+                route="测试路径",
+            )
+
+        result = await plugin._try_visual_providers(_FakeVideoEvent(), operation)
+
+        self.assertEqual(result, "画面中有人正在晾衣服。")
+        self.assertEqual(calls, providers)
+
+    def test_default_visual_refusal_keywords_work_before_config_is_saved(self):
+        plugin = self._plugin()
+
+        self.assertIn("i can't discuss", plugin._visual_refusal_keywords())
+        self.assertIn("我是kiro", plugin._visual_refusal_keywords())
+
+    def test_visual_refusal_keywords_match_kiro_and_discuss_responses(self):
+        plugin = self._plugin(
+            {
+                "caption_refusal_keywords": [
+                    "I can't discuss",
+                    "我是Kiro",
+                    "AI 开发环境助手",
+                ]
+            }
+        )
+
+        for text in (
+            "I can't discuss that.",
+            "我是Kiro，一个AI开发环境助手。",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "返回了拒绝内容"):
+                validate_vision_response(
+                    SimpleNamespace(completion_text=text),
+                    refusal_keywords=plugin._visual_refusal_keywords(),
+                    route="测试路径",
+                )
 
     async def test_temporary_mode_uses_video_only_for_current_request(self) -> None:
         old = {

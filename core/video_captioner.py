@@ -25,10 +25,52 @@ DEFAULT_COMMENT_MEDIA_PROMPT = (
     "不要判断视频类型，不要扩展评论观点，不要编造。"
 )
 
+DEFAULT_VISUAL_REFUSAL_KEYWORDS = (
+    "无法协助",
+    "不能协助",
+    "无法描述",
+    "不能描述",
+    "抱歉，我不能",
+    "i can't help",
+    "i cannot help",
+    "unable to assist",
+    "i can't discuss",
+    "我是kiro",
+    "我是 kiro",
+    "ai开发环境助手",
+    "ai 开发环境助手",
+)
+
 COMMENT_MEDIA_OUTPUT_PROTOCOL = (
     "每张图片前都有唯一编号。每张图片只输出一行，"
     "严格使用“编号: 描述”的格式，不要遗漏或修改编号。"
 )
+
+
+def validate_vision_response(
+    response: object,
+    *,
+    refusal_keywords: list[str],
+    route: str,
+) -> str:
+    text = str(getattr(response, "completion_text", "") or "").strip()
+    if not text:
+        raise RuntimeError(f"视觉模型返回了空文本（{route}）")
+
+    normalized = " ".join(text.lower().split())
+    matched_keyword = next(
+        (
+            keyword.strip()
+            for keyword in refusal_keywords
+            if keyword.strip().lower() in normalized
+        ),
+        "",
+    )
+    if matched_keyword:
+        raise RuntimeError(
+            f"视觉模型返回了拒绝内容（{route}，命中关键词：{matched_keyword}）"
+        )
+    return text
 
 
 def build_comment_media_prompt(prompt: str) -> str:
@@ -41,6 +83,7 @@ async def caption_from_url(
     *,
     provider: object,
     prompt: str = DEFAULT_CAPTION_PROMPT,
+    refusal_keywords: list[str] | None = None,
 ) -> str:
     """Ask the vision model to caption a video via direct URL.
 
@@ -63,9 +106,11 @@ async def caption_from_url(
     except Exception as exc:
         raise RuntimeError(f"视觉模型调用失败（video_url 路径）：{exc}") from exc
 
-    text = str(getattr(resp, "completion_text", "") or "").strip()
-    if not text:
-        raise RuntimeError("视觉模型返回了空文本（video_url 路径）")
+    text = validate_vision_response(
+        resp,
+        refusal_keywords=refusal_keywords or [],
+        route="video_url 路径",
+    )
     return text
 
 
@@ -129,6 +174,7 @@ async def caption_from_image_urls(
     preprocess_enabled: bool = False,
     preprocess_max_size: int = 1280,
     preprocess_quality: int = 85,
+    refusal_keywords: list[str] | None = None,
 ) -> str:
     """Download image URLs, encode to base64, and ask the vision model to caption them.
 
@@ -197,9 +243,11 @@ async def caption_from_image_urls(
     except Exception as exc:
         raise RuntimeError(f"视觉模型调用失败（图片路径）：{exc}") from exc
 
-    text = str(getattr(resp, "completion_text", "") or "").strip()
-    if not text:
-        raise RuntimeError("视觉模型返回了空文本（图片路径）")
+    text = validate_vision_response(
+        resp,
+        refusal_keywords=refusal_keywords or [],
+        route="图片路径",
+    )
     return text
 
 
@@ -253,6 +301,7 @@ async def caption_from_media_urls(
     preprocess_enabled: bool = False,
     preprocess_max_size: int = 1280,
     preprocess_quality: int = 85,
+    refusal_keywords: list[str] | None = None,
 ) -> str:
     """Caption mixed image/animated media URLs using one shared frame budget."""
     import aiohttp
@@ -355,9 +404,11 @@ async def caption_from_media_urls(
     except Exception as exc:
         raise RuntimeError(f"视觉模型调用失败（图文/动图路径）：{exc}") from exc
 
-    text = str(getattr(resp, "completion_text", "") or "").strip()
-    if not text:
-        raise RuntimeError("视觉模型返回了空文本（图文/动图路径）")
+    text = validate_vision_response(
+        resp,
+        refusal_keywords=refusal_keywords or [],
+        route="图文/动图路径",
+    )
     return text
 
 
@@ -371,6 +422,7 @@ async def caption_comment_media(
     preprocess_enabled: bool = False,
     preprocess_max_size: int = 1280,
     preprocess_quality: int = 85,
+    refusal_keywords: list[str] | None = None,
 ) -> dict[str, str]:
     """Describe numbered comment media in one model request."""
     import aiohttp
@@ -447,9 +499,11 @@ async def caption_comment_media(
         )
     except Exception as exc:
         raise RuntimeError(f"评论图片模型调用失败：{exc}") from exc
-    text = str(getattr(response, "completion_text", "") or "").strip()
-    if not text:
-        raise RuntimeError("评论图片模型返回了空文本")
+    text = validate_vision_response(
+        response,
+        refusal_keywords=refusal_keywords or [],
+        route="评论图片路径",
+    )
 
     descriptions: dict[str, str] = {}
     valid_ids = {media_id for media_id, _ in selected}
@@ -479,6 +533,7 @@ async def caption_from_frames(
     ffmpeg_path: str = "",
     preprocess_max_size: int = 0,
     preprocess_quality: int = 85,
+    refusal_keywords: list[str] | None = None,
 ) -> str:
     """Extract frames with ffmpeg and ask the vision model to caption them.
 
@@ -519,9 +574,11 @@ async def caption_from_frames(
     except Exception as exc:
         raise RuntimeError(f"视觉模型调用失败（抽帧路径）：{exc}") from exc
 
-    text = str(getattr(resp, "completion_text", "") or "").strip()
-    if not text:
-        raise RuntimeError("视觉模型返回了空文本（抽帧路径）")
+    text = validate_vision_response(
+        resp,
+        refusal_keywords=refusal_keywords or [],
+        route="抽帧路径",
+    )
     return text
 
 

@@ -43,6 +43,7 @@ from .core.url_extractor import extract_video_url
 from .core.video_captioner import (
     DEFAULT_CAPTION_PROMPT,
     DEFAULT_COMMENT_MEDIA_PROMPT,
+    DEFAULT_VISUAL_REFUSAL_KEYWORDS,
     caption_comment_media,
     caption_from_frames,
     caption_from_media_urls,
@@ -77,7 +78,7 @@ class AnalysisOptions:
     "灵犀 · 视频理解",
     "灵犀",
     "自动理解直发视频与抖音/B站链接，并限制历史中的完整视频解析数量",
-    "2.6.0",
+    "2.6.1",
     "https://github.com/gongzhudeng/astrbot_plugin_video_chat",
 )
 class VideoChatPlugin(Star):
@@ -727,6 +728,7 @@ class VideoChatPlugin(Star):
                     preprocess_enabled=preprocess_enabled,
                     preprocess_max_size=preprocess_max_size,
                     preprocess_quality=preprocess_quality,
+                    refusal_keywords=self._visual_refusal_keywords(),
                 )
                 if descriptions:
                     break
@@ -750,6 +752,7 @@ class VideoChatPlugin(Star):
                 url,
                 provider=provider,
                 prompt=self._caption_prompt(event),
+                refusal_keywords=self._visual_refusal_keywords(),
             ),
         )
 
@@ -777,6 +780,7 @@ class VideoChatPlugin(Star):
                 ffmpeg_path=ffmpeg_path,
                 preprocess_max_size=(preprocess_max_size if preprocess_enabled else 0),
                 preprocess_quality=preprocess_quality,
+                refusal_keywords=self._visual_refusal_keywords(),
             ),
         )
 
@@ -806,6 +810,7 @@ class VideoChatPlugin(Star):
                 preprocess_enabled=preprocess_enabled,
                 preprocess_max_size=preprocess_max_size,
                 preprocess_quality=preprocess_quality,
+                refusal_keywords=self._visual_refusal_keywords(),
             ),
         )
 
@@ -1053,6 +1058,15 @@ class VideoChatPlugin(Star):
             str(self.config.get("comment_media_caption_prompt", "") or "").strip()
             or DEFAULT_COMMENT_MEDIA_PROMPT
         )
+
+    def _visual_refusal_keywords(self) -> list[str]:
+        configured = self.config.get(
+            "caption_refusal_keywords", list(DEFAULT_VISUAL_REFUSAL_KEYWORDS)
+        )
+        if not isinstance(configured, list):
+            logger.warning("[video-chat] 视频模型拒绝判定关键词配置不是列表")
+            return []
+        return [str(keyword).strip() for keyword in configured if str(keyword).strip()]
 
     def _cookies_file(self) -> str | None:
         return (
