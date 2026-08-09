@@ -2,8 +2,14 @@
   "auto_parse_video_messages": {
     "type": "bool",
     "description": "自动解析消息中的视频",
-    "hint": "开启后自动解析当前消息中的直发视频，以及明确出现的抖音/B站链接。引用视频不会重复解析。关闭后仅保留 /视频 命令和 analyze_video 工具模式。",
+    "hint": "开启后自动解析当前消息中的直发视频，以及明确出现的抖音/B站链接。引用视频不会重复解析。关闭后仍可使用 /视频 命令；是否向 AI 提供 analyze_video 由独立工具开关控制。",
     "default": true
+  },
+  "analyze_video_tool_enabled": {
+    "type": "bool",
+    "description": "允许 AI 主动调用视频分析工具",
+    "hint": "默认关闭。关闭后 analyze_video 不会提供给主模型，但当前消息中的视频仍会自动解析，/视频 命令也仍可使用。开启后 AI 可主动分析链接；同一轮最多解析一个视频。",
+    "default": false
   },
   "max_video_context_details": {
     "type": "int",

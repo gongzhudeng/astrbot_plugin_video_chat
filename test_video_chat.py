@@ -49,6 +49,8 @@ from core.video_captioner import (
 from core.image_preprocess import prepare_image_bytes
 from core.video_context import (
     VIDEO_CONTEXT_PRUNED,
+    delete_video_context,
+    list_video_contexts,
     prune_video_contexts,
     wrap_video_context,
 )
@@ -84,11 +86,13 @@ class _FakeProviderRequest:
         contexts: list | None = None,
         extra_user_content_parts: list | None = None,
         conversation=None,
+        func_tool=None,
     ) -> None:
         self.prompt = prompt
         self.contexts = contexts or []
         self.extra_user_content_parts = extra_user_content_parts or []
         self.conversation = conversation
+        self.func_tool = func_tool
 
 
 class ImagePreprocessTests(unittest.TestCase):
@@ -384,7 +388,12 @@ class AutoVideoContextTests(unittest.IsolatedAsyncioTestCase):
             "role": "user",
             "content": [{"type": "text", "text": wrap_video_context("old")}],
         }
-        plugin = self._plugin({"max_video_context_details": 1})
+        plugin = self._plugin(
+            {
+                "max_video_context_details": 1,
+                "analyze_video_tool_enabled": True,
+            }
+        )
         plugin._do_analyze = AsyncMock(return_value="new-details")
         event = _FakeVideoEvent(message_str="看看 https://www.bilibili.com/video/BV1xx")
         request = _FakeProviderRequest(prompt="这个视频讲了什么？", contexts=[old])
@@ -398,8 +407,101 @@ class AutoVideoContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("new-details", request.extra_user_content_parts[-1].text)
         normalized_url = "https://www.bilibili.com/video/BV1xx"
         self.assertEqual(event.get_extra("video_chat_processed_source"), normalized_url)
-        self.assertIn("当前请求已自动解析一个视频", duplicate_result)
+        self.assertIn("当前请求已解析一个视频", duplicate_result)
         plugin._do_analyze.assert_awaited_once_with(event, normalized_url)
+
+    async def test_disabled_tool_is_removed_and_handler_rejects(self) -> None:
+        removed: list[str] = []
+        tool_set = SimpleNamespace(remove_tool=removed.append)
+        plugin = self._plugin()
+        plugin._do_analyze = AsyncMock(return_value="unused")
+        event = _FakeVideoEvent(message_str="普通消息")
+        request = _FakeProviderRequest(func_tool=tool_set)
+
+        await plugin.inject_video_context(event, request)
+        result = await plugin.analyze_video(
+            event, "https://www.bilibili.com/video/BV1xx"
+        )
+
+        self.assertEqual(removed, ["analyze_video"])
+        self.assertIn("视频分析工具已关闭", result)
+        plugin._do_analyze.assert_not_awaited()
+
+    async def test_enabled_tool_allows_only_one_analysis_per_event(self) -> None:
+        plugin = self._plugin({"analyze_video_tool_enabled": True})
+        plugin._do_analyze = AsyncMock(return_value="[视频解析结果]\n工具详情")
+        event = _FakeVideoEvent()
+
+        first = await plugin.analyze_video(
+            event, "https://www.bilibili.com/video/BV1xx"
+        )
+        second = await plugin.analyze_video(
+            event, "https://www.bilibili.com/video/BV2yy"
+        )
+
+        self.assertIn("工具详情", first)
+        self.assertIn("当前请求已解析一个视频", second)
+        plugin._do_analyze.assert_awaited_once()
+
+    async def test_list_and_delete_video_context_commands(self) -> None:
+        history = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": wrap_video_context(
+                            "[视频解析结果]\n\n【作品】\n平台：抖音\n标题：老头奶茶"
+                        ),
+                    }
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "id": "video-call",
+                        "function": {
+                            "name": "analyze_video",
+                            "arguments": json.dumps(
+                                {"url": "https://v.douyin.com/old/"}
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "video-call",
+                "content": ("[视频解析结果]\n\n【作品】\n平台：抖音\n标题：小学生幻想"),
+            },
+        ]
+        conversation = SimpleNamespace(
+            cid="conversation-id",
+            history=json.dumps(history, ensure_ascii=False),
+        )
+        manager = SimpleNamespace(
+            get_curr_conversation_id=AsyncMock(return_value="conversation-id"),
+            get_conversation=AsyncMock(return_value=conversation),
+            update_conversation=AsyncMock(),
+        )
+        plugin = self._plugin()
+        plugin.context = SimpleNamespace(conversation_manager=manager)
+        event = _FakeVideoEvent()
+
+        listed = [result async for result in plugin.cmd_list_video_context(event)]
+        deleted = [
+            result async for result in plugin.cmd_delete_video_context(event, "2")
+        ]
+
+        self.assertIn("1. [自动] 抖音 · 老头奶茶", listed[0])
+        self.assertIn("2. [工具] 抖音 · 小学生幻想", listed[0])
+        self.assertEqual(deleted, ["已删除视频上下文：[工具] 抖音 · 小学生幻想"])
+        saved = manager.update_conversation.await_args.kwargs["history"]
+        self.assertEqual(len(list_video_contexts(saved)), 1)
+        self.assertFalse(any(item.get("role") == "tool" for item in saved))
 
     async def test_douyin_video_uses_local_frames_instead_of_native_video_url(self):
         plugin = self._plugin()
@@ -862,6 +964,98 @@ class VideoContextLimitTests(unittest.TestCase):
         self.assertEqual(pruned, 1)
         self.assertEqual(contexts[0]["content"][0]["text"], "user")
         self.assertEqual(contexts[0]["content"][1]["text"], VIDEO_CONTEXT_PRUNED)
+
+    def test_mixed_marker_and_tool_contexts_share_one_limit(self) -> None:
+        contexts = [
+            self._video_message(
+                "[视频解析结果]\n\n【作品】\n平台：抖音\n标题：自动视频",
+                "自动链接",
+            ),
+            {
+                "role": "assistant",
+                "content": "保留这段正文",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "id": "video-call",
+                        "function": {
+                            "name": "analyze_video",
+                            "arguments": '{"url":"https://v.douyin.com/tool/"}',
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "id": "other-call",
+                        "function": {"name": "other_tool", "arguments": "{}"},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "video-call",
+                "content": (
+                    "[视频解析结果]\n\n【作品】\n平台：哔哩哔哩\n标题：工具视频"
+                ),
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "other-call",
+                "content": "其他工具结果",
+            },
+        ]
+
+        entries = list_video_contexts(contexts)
+        pruned = prune_video_contexts(contexts, max_details=1)
+
+        self.assertEqual([entry.kind for entry in entries], ["自动", "工具"])
+        self.assertEqual([entry.title for entry in entries], ["自动视频", "工具视频"])
+        self.assertEqual(pruned, 1)
+        self.assertEqual(len(list_video_contexts(contexts)), 1)
+        self.assertIn(VIDEO_CONTEXT_PRUNED, contexts[0]["content"][1]["text"])
+        self.assertEqual(contexts[1]["tool_calls"][0]["id"], "video-call")
+
+    def test_deleting_tool_context_preserves_unrelated_tool_call(self) -> None:
+        contexts = [
+            {
+                "role": "assistant",
+                "content": "保留正文",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "id": "video-call",
+                        "function": {
+                            "name": "analyze_video",
+                            "arguments": '{"url":"https://v.douyin.com/tool/"}',
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "id": "other-call",
+                        "function": {"name": "other_tool", "arguments": "{}"},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "video-call",
+                "content": "[视频解析结果]\n\n【作品】\n平台：抖音",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "other-call",
+                "content": "其他工具结果",
+            },
+        ]
+
+        deleted = delete_video_context(contexts, 1)
+
+        self.assertIsNotNone(deleted)
+        self.assertEqual(contexts[0]["content"], "保留正文")
+        self.assertEqual(
+            [call["id"] for call in contexts[0]["tool_calls"]], ["other-call"]
+        )
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual(contexts[1]["tool_call_id"], "other-call")
 
     def test_pruning_is_idempotent_and_ignores_user_forged_text(self) -> None:
         forged = {
