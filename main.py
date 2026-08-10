@@ -26,7 +26,11 @@ from .core.bili_resolver import (
     resolve_bilibili,
 )
 from .core.bili_subtitle import fetch_bili_subtitle
-from .core.context_formatter import format_media_work, select_hot_comments
+from .core.context_formatter import (
+    format_media_metadata,
+    format_media_work,
+    select_hot_comments,
+)
 from .core.douyin_resolver import DouyinResult, is_douyin_url, resolve_douyin
 from .core.media_input import (
     VideoReference,
@@ -481,6 +485,7 @@ class VideoChatPlugin(Star):
                     resolved.path,
                     options.first_seconds,
                     options.ffmpeg_path,
+                    work,
                 )
                 if self._stt_enabled():
                     work.transcript = await self._transcribe_with_fallback(
@@ -644,7 +649,7 @@ class VideoChatPlugin(Star):
         if await download_bili_stream(media.video_url, video_path):
             work.local_video_path = video_path
             work.visual_summary = await self._caption_frames_with_fallback(
-                event, video_path, first_seconds, ffmpeg_path
+                event, video_path, first_seconds, ffmpeg_path, work
             )
         if not work.subtitle and self._stt_enabled():
             audio_source = work.local_video_path
@@ -697,7 +702,7 @@ class VideoChatPlugin(Star):
         work = self._work_from_douyin(result, url)
         if result.image_urls:
             work.visual_summary = await self._caption_media_with_fallback(
-                event, result.image_urls, first_seconds, ffmpeg_path
+                event, result.image_urls, first_seconds, ffmpeg_path, work
             )
             return work
         if not result.play_url:
@@ -714,7 +719,7 @@ class VideoChatPlugin(Star):
             await download_media(result.play_url, local_video, max_bytes=max_bytes)
             work.local_video_path = local_video
             work.visual_summary = await self._caption_frames_with_fallback(
-                event, local_video, first_seconds, ffmpeg_path
+                event, local_video, first_seconds, ffmpeg_path, work
             )
             if self._stt_enabled():
                 work.transcript = await self._transcribe_with_fallback(
@@ -748,13 +753,13 @@ class VideoChatPlugin(Star):
             work = MediaWork(platform="其他", source_url=url, title=source.title or "")
             if source.has_stream_url:
                 work.visual_summary = await self._caption_url_with_fallback(
-                    event, source.stream_url
+                    event, source.stream_url, work
                 )
             if source.has_local_file:
                 work.local_video_path = source.local_path
                 if not work.visual_summary:
                     work.visual_summary = await self._caption_frames_with_fallback(
-                        event, source.local_path, first_seconds, ffmpeg_path
+                        event, source.local_path, first_seconds, ffmpeg_path, work
                     )
                 if self._stt_enabled():
                     work.transcript = await self._transcribe_with_fallback(
@@ -848,7 +853,10 @@ class VideoChatPlugin(Star):
                 owner.media_descriptions.append(description)
 
     async def _caption_url_with_fallback(
-        self, event: AstrMessageEvent, url: str
+        self,
+        event: AstrMessageEvent,
+        url: str,
+        work: MediaWork | None = None,
     ) -> str:
         return await self._try_visual_providers(
             event,
@@ -856,6 +864,8 @@ class VideoChatPlugin(Star):
                 url,
                 provider=provider,
                 prompt=self._caption_prompt(event),
+                user_context=self._caption_user_context(event),
+                video_info=self._video_info_for_caption(work),
                 refusal_keywords=self._visual_refusal_keywords(),
             ),
         )
@@ -866,6 +876,7 @@ class VideoChatPlugin(Star):
         path: Path,
         first_seconds: int,
         ffmpeg_path: str,
+        work: MediaWork | None = None,
     ) -> str:
         preprocess_enabled, preprocess_max_size, preprocess_quality = (
             self._image_preprocess_options()
@@ -876,6 +887,8 @@ class VideoChatPlugin(Star):
                 path,
                 provider=provider,
                 prompt=self._caption_prompt(event),
+                user_context=self._caption_user_context(event),
+                video_info=self._video_info_for_caption(work),
                 frames_per_second=float(
                     self.config.get("frames_per_second", 1.0) or 1.0
                 ),
@@ -894,6 +907,7 @@ class VideoChatPlugin(Star):
         urls: list[str],
         first_seconds: int,
         ffmpeg_path: str,
+        work: MediaWork | None = None,
     ) -> str:
         preprocess_enabled, preprocess_max_size, preprocess_quality = (
             self._image_preprocess_options()
@@ -904,6 +918,8 @@ class VideoChatPlugin(Star):
                 urls,
                 provider=provider,
                 prompt=self._caption_prompt(event),
+                user_context=self._caption_user_context(event),
+                video_info=self._video_info_for_caption(work),
                 max_media=max(1, int(self.config.get("max_images", 9) or 9)),
                 frames_per_second=float(
                     self.config.get("frames_per_second", 1.0) or 1.0
@@ -1140,21 +1156,36 @@ class VideoChatPlugin(Star):
         )
         return value[:max_chars] if max_chars else ""
 
+    def _caption_user_context(self, event: AstrMessageEvent | None) -> str:
+        if event is None:
+            return ""
+        context = str(event.get_extra("video_chat_user_context", "") or "").strip()
+        if not context:
+            return ""
+        return f"<user_context>\n用户同轮聊天记录：\n{context}\n</user_context>"
+
+    @staticmethod
+    def _video_info_for_caption(work: MediaWork | None) -> str:
+        if work is None:
+            return ""
+        metadata = format_media_metadata(work)
+        if work.source_url:
+            metadata += f"\n链接：{work.source_url}"
+        return f"<video_info>\n视频信息：\n{metadata}\n</video_info>"
+
     def _caption_prompt(self, event: AstrMessageEvent | None = None) -> str:
         base = (
             str(self.config.get("caption_prompt", "") or "").strip()
             or DEFAULT_CAPTION_PROMPT
         )
-        if event is None:
-            return base
-        context = str(event.get_extra("video_chat_user_context", "") or "").strip()
-        if not context:
+        if "视频信息" in base or "视频元信息" in base:
             return base
         return (
             f"{base}\n\n"
-            "以下是用户与该视频同一轮发送的文字，仅用于理解提问语境；"
-            "不要把用户的猜测当成视频中实际出现的事实：\n"
-            f"<user_context>{context}</user_context>"
+            "## 五、额外补充信息\n"
+            "后方可能提供两类辅助信息：用户聊天记录（与该视频同轮发送），"
+            "以及平台提供的视频信息（例如作者、标题、描述、话题标签和发布时间）。"
+            "请参考它们理解用户的关注重点和视频背景，但不要把辅助信息当作画面中已经出现的事实。"
         )
 
     def _comment_media_caption_prompt(self) -> str:

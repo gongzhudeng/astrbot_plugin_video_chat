@@ -44,6 +44,7 @@ from core.video_captioner import (
     _image_mime,
     _jpeg_qscale,
     build_comment_media_prompt,
+    caption_from_frames,
     validate_vision_response,
 )
 from core.image_preprocess import prepare_image_bytes
@@ -709,11 +710,61 @@ class AutoVideoContextTests(unittest.IsolatedAsyncioTestCase):
         event.set_extra("video_chat_user_context", context)
 
         prompt = plugin._caption_prompt(event)
+        user_context = plugin._caption_user_context(event)
+        video_info = plugin._video_info_for_caption(
+            MediaWork(
+                platform="抖音",
+                source_url="https://v.douyin.com/example/",
+                title="测试标题",
+                description="测试描述",
+                topics=["#测试", "#舞蹈"],
+                author="测试作者",
+                author_id="author-1",
+                published_at="2026-08-10",
+            )
+        )
 
-        self.assertNotIn("图片说明", prompt)
-        self.assertNotIn("[视频1]", prompt)
-        self.assertIn("这是用户问题", prompt)
-        self.assertIn("不要把用户的猜测", prompt)
+        self.assertNotIn("图片说明", user_context)
+        self.assertNotIn("[视频1]", user_context)
+        self.assertIn("这是用户问题", user_context)
+        self.assertIn("用户聊天记录", prompt)
+        self.assertIn("视频信息", prompt)
+        self.assertIn("标题：测试标题", video_info)
+        self.assertIn("作者：测试作者（author-1）", video_info)
+        self.assertIn("话题：#测试 #舞蹈", video_info)
+        self.assertIn("链接：https://v.douyin.com/example/", video_info)
+
+    async def test_caption_payload_orders_frames_prompt_chat_and_video_info(
+        self,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        class Provider:
+            async def text_chat(self, *, contexts):
+                captured["contexts"] = contexts
+                return SimpleNamespace(completion_text="转述结果")
+
+        with patch(
+            "core.video_captioner._extract_frames_sync",
+            return_value=["data:image/jpeg;base64,frame-1"],
+        ):
+            result = await caption_from_frames(
+                Path("video.mp4"),
+                provider=Provider(),
+                prompt="转述提示词",
+                user_context="<user_context>用户聊天记录</user_context>",
+                video_info="<video_info>标题：测试标题</video_info>",
+            )
+
+        content = captured["contexts"][0]["content"]
+        self.assertEqual(result, "转述结果")
+        self.assertEqual(
+            [part["type"] for part in content],
+            ["image_url", "text", "text", "text"],
+        )
+        self.assertEqual(content[1]["text"], "转述提示词")
+        self.assertIn("用户聊天记录", content[2]["text"])
+        self.assertIn("标题：测试标题", content[3]["text"])
 
 
 class DirectVideoInputTests(unittest.IsolatedAsyncioTestCase):

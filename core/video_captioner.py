@@ -78,11 +78,27 @@ def build_comment_media_prompt(prompt: str) -> str:
     return f"{prompt_text}\n\n{COMMENT_MEDIA_OUTPUT_PROTOCOL}"
 
 
+def _caption_text_parts(
+    prompt: str,
+    *,
+    user_context: str = "",
+    video_info: str = "",
+) -> list[dict[str, str]]:
+    parts = [{"type": "text", "text": prompt}]
+    if user_context.strip():
+        parts.append({"type": "text", "text": user_context.strip()})
+    if video_info.strip():
+        parts.append({"type": "text", "text": video_info.strip()})
+    return parts
+
+
 async def caption_from_url(
     stream_url: str,
     *,
     provider: object,
     prompt: str = DEFAULT_CAPTION_PROMPT,
+    user_context: str = "",
+    video_info: str = "",
     refusal_keywords: list[str] | None = None,
 ) -> str:
     """Ask the vision model to caption a video via direct URL.
@@ -93,11 +109,15 @@ async def caption_from_url(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": prompt},
                 {
                     "type": "video_url",
                     "video_url": {"url": stream_url},
                 },
+                *_caption_text_parts(
+                    prompt,
+                    user_context=user_context,
+                    video_info=video_info,
+                ),
             ],
         }
     ]
@@ -293,6 +313,8 @@ async def caption_from_media_urls(
     *,
     provider: object,
     prompt: str = DEFAULT_CAPTION_PROMPT,
+    user_context: str = "",
+    video_info: str = "",
     max_media: int = 9,
     frames_per_second: float = 1.0,
     max_frames: int = 30,
@@ -388,8 +410,12 @@ async def caption_from_media_urls(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": prompt},
                 *image_blocks,
+                *_caption_text_parts(
+                    prompt,
+                    user_context=user_context,
+                    video_info=video_info,
+                ),
             ],
         }
     ]
@@ -527,6 +553,8 @@ async def caption_from_frames(
     *,
     provider: object,
     prompt: str = DEFAULT_CAPTION_PROMPT,
+    user_context: str = "",
+    video_info: str = "",
     frames_per_second: float = 1.0,
     max_frames: int = 30,
     analyze_first_seconds: int = 120,
@@ -563,8 +591,12 @@ async def caption_from_frames(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": prompt},
                 *image_blocks,
+                *_caption_text_parts(
+                    prompt,
+                    user_context=user_context,
+                    video_info=video_info,
+                ),
             ],
         }
     ]

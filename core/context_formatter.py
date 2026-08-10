@@ -105,13 +105,7 @@ def select_hot_comments(
     return selected
 
 
-def format_media_work(
-    work: MediaWork,
-    *,
-    comment_max_count: int = 10,
-    comment_max_chars: int = 500,
-    comment_reply_limit: int = 0,
-) -> str:
+def format_media_metadata(work: MediaWork) -> str:
     metadata = [f"平台：{work.platform}"]
     if work.work_type:
         metadata.append(f"类型：{work.work_type}")
@@ -130,8 +124,17 @@ def format_media_work(
         metadata.append(f"作者账号：{work.author_id}")
     if work.published_at:
         metadata.append(f"发布时间：{work.published_at}")
+    return "\n".join(metadata)
 
-    sections = ["[视频解析结果]", "【作品】\n" + "\n".join(metadata)]
+
+def format_media_work(
+    work: MediaWork,
+    *,
+    comment_max_count: int = 10,
+    comment_max_chars: int = 500,
+    comment_reply_limit: int = 0,
+) -> str:
+    sections = ["[视频解析结果]", "【作品】\n" + format_media_metadata(work)]
     if work.subtitle:
         sections.append("【字幕】\n" + work.subtitle.strip())
     elif work.transcript:
