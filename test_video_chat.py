@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: E402, I001
 
+import asyncio
 import io
 import json
 import os
@@ -1125,6 +1126,104 @@ class VideoContextLimitTests(unittest.TestCase):
             forged["content"],
             "<!-- astrbot-video-chat:context:v1:start -->not-closed",
         )
+
+
+class SttTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _plugin(timeout_seconds: float) -> VideoChatPlugin:
+        plugin = object.__new__(VideoChatPlugin)
+        plugin.config = {
+            "stt_enabled": True,
+            "stt_timeout_seconds": timeout_seconds,
+        }
+        return plugin
+
+    async def _run_media(
+        self,
+        *,
+        timeout_seconds: float,
+        visual_delay: float,
+        stt_delay: float,
+    ) -> tuple[MediaWork, bool, float]:
+        plugin = self._plugin(timeout_seconds)
+        work = MediaWork(platform="测试", source_url="")
+        stt_cancelled = False
+
+        async def visual_operation() -> str:
+            await asyncio.sleep(visual_delay)
+            return "画面结果"
+
+        async def transcribe(*args, **kwargs) -> str:
+            nonlocal stt_cancelled
+            try:
+                await asyncio.sleep(stt_delay)
+                return "语音结果"
+            except asyncio.CancelledError:
+                stt_cancelled = True
+                raise
+
+        plugin._transcribe_with_fallback = transcribe
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        await plugin._analyze_local_video_media(
+            _FakeVideoEvent(),
+            work,
+            Path("video.mp4"),
+            Path("."),
+            120,
+            "",
+            visual_operation=visual_operation,
+        )
+        return work, stt_cancelled, loop.time() - started_at
+
+    async def test_stt_result_is_kept_when_visual_runs_past_deadline(self) -> None:
+        work, cancelled, _ = await self._run_media(
+            timeout_seconds=0.01,
+            visual_delay=0.04,
+            stt_delay=0.02,
+        )
+
+        self.assertEqual(work.visual_summary, "画面结果")
+        self.assertEqual(work.transcript, "语音结果")
+        self.assertFalse(cancelled)
+
+    async def test_stt_is_cancelled_after_visual_finishes_and_deadline_expires(
+        self,
+    ) -> None:
+        work, cancelled, elapsed = await self._run_media(
+            timeout_seconds=0.03,
+            visual_delay=0.005,
+            stt_delay=1,
+        )
+
+        self.assertEqual(work.visual_summary, "画面结果")
+        self.assertEqual(work.transcript, "")
+        self.assertTrue(cancelled)
+        self.assertLess(elapsed, 0.2)
+
+    async def test_visual_may_run_past_deadline_before_stt_is_cancelled(self) -> None:
+        work, cancelled, elapsed = await self._run_media(
+            timeout_seconds=0.01,
+            visual_delay=0.04,
+            stt_delay=1,
+        )
+
+        self.assertEqual(work.visual_summary, "画面结果")
+        self.assertEqual(work.transcript, "")
+        self.assertTrue(cancelled)
+        self.assertGreaterEqual(elapsed, 0.035)
+        self.assertLess(elapsed, 0.2)
+
+    async def test_zero_timeout_waits_for_stt_after_visual_finishes(self) -> None:
+        work, cancelled, elapsed = await self._run_media(
+            timeout_seconds=0,
+            visual_delay=0.005,
+            stt_delay=0.03,
+        )
+
+        self.assertEqual(work.transcript, "语音结果")
+        self.assertFalse(cancelled)
+        self.assertGreaterEqual(elapsed, 0.025)
 
 
 class CommentBudgetTests(unittest.TestCase):

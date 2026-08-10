@@ -220,6 +220,17 @@
     "hint": "开启时与“只分析前 N 秒”保持一致；关闭时识别完整音频。",
     "default": true
   },
+  "stt_timeout_seconds": {
+    "type": "int",
+    "description": "STT 超时放弃秒数",
+    "hint": "默认 60 秒。画面转述完成后，如果 STT 从启动起已达到该时长仍未完成，则取消 STT 并继续返回画面结果；画面转述尚未完成时不会提前放弃。设为 0 表示始终等待 STT。",
+    "slider": {
+      "min": 0,
+      "max": 600,
+      "step": 10
+    },
+    "default": 60
+  },
   "hot_comments_enabled": {
     "type": "bool",
     "description": "读取高赞评论",

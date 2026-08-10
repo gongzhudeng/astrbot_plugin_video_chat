@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -480,21 +481,14 @@ class VideoChatPlugin(Star):
                     work_type="视频",
                     local_video_path=resolved.path,
                 )
-                work.visual_summary = await self._caption_frames_with_fallback(
+                await self._analyze_local_video_media(
                     event,
+                    work,
                     resolved.path,
+                    temp_dir,
                     options.first_seconds,
                     options.ffmpeg_path,
-                    work,
                 )
-                if self._stt_enabled():
-                    work.transcript = await self._transcribe_with_fallback(
-                        event,
-                        resolved.path,
-                        temp_dir,
-                        options.first_seconds,
-                        options.ffmpeg_path,
-                    )
                 result = await self._finalize_work(event, work, options)
                 completed = True
                 return result
@@ -646,28 +640,34 @@ class VideoChatPlugin(Star):
         if media is None or not media.video_url:
             return work
         video_path = temp_dir / "bili_video.m4s"
-        if await download_bili_stream(media.video_url, video_path):
-            work.local_video_path = video_path
-            work.visual_summary = await self._caption_frames_with_fallback(
-                event, video_path, first_seconds, ffmpeg_path, work
-            )
-        if not work.subtitle and self._stt_enabled():
-            audio_source = work.local_video_path
-            if media.audio_url:
-                audio_source = temp_dir / "bili_audio.m4s"
-                try:
-                    await download_media(
-                        media.audio_url,
-                        audio_source,
-                        headers={"Referer": "https://www.bilibili.com/"},
-                        max_bytes=max_bytes,
-                    )
-                except Exception as exc:
-                    logger.warning("[video-chat] B站音轨下载失败：%s", exc)
-            if audio_source and audio_source.exists():
-                work.transcript = await self._transcribe_with_fallback(
-                    event, audio_source, temp_dir, first_seconds, ffmpeg_path
+        if not await download_bili_stream(media.video_url, video_path):
+            return work
+        work.local_video_path = video_path
+
+        audio_source = video_path
+        if not work.subtitle and self._stt_enabled() and media.audio_url:
+            downloaded_audio = temp_dir / "bili_audio.m4s"
+            try:
+                await download_media(
+                    media.audio_url,
+                    downloaded_audio,
+                    headers={"Referer": "https://www.bilibili.com/"},
+                    max_bytes=max_bytes,
                 )
+                audio_source = downloaded_audio
+            except Exception as exc:
+                logger.warning("[video-chat] B站音轨下载失败：%s", exc)
+
+        await self._analyze_local_video_media(
+            event,
+            work,
+            video_path,
+            temp_dir,
+            first_seconds,
+            ffmpeg_path,
+            audio_source=audio_source,
+            enable_stt=not work.subtitle,
+        )
         return work
 
     async def _analyze_douyin(
@@ -718,13 +718,14 @@ class VideoChatPlugin(Star):
         try:
             await download_media(result.play_url, local_video, max_bytes=max_bytes)
             work.local_video_path = local_video
-            work.visual_summary = await self._caption_frames_with_fallback(
-                event, local_video, first_seconds, ffmpeg_path, work
+            await self._analyze_local_video_media(
+                event,
+                work,
+                local_video,
+                temp_dir,
+                first_seconds,
+                ffmpeg_path,
             )
-            if self._stt_enabled():
-                work.transcript = await self._transcribe_with_fallback(
-                    event, local_video, temp_dir, first_seconds, ffmpeg_path
-                )
         except Exception as exc:
             logger.warning("[video-chat] 抖音媒体下载或抽帧失败：%s", exc)
         return work
@@ -751,24 +752,110 @@ class VideoChatPlugin(Star):
                 cookies_file=self._cookies_file(),
             )
             work = MediaWork(platform="其他", source_url=url, title=source.title or "")
-            if source.has_stream_url:
+            if source.has_local_file:
+                work.local_video_path = source.local_path
+
+                async def caption_source() -> str:
+                    summary = ""
+                    if source.has_stream_url:
+                        summary = await self._caption_url_with_fallback(
+                            event, source.stream_url, work
+                        )
+                    if not summary:
+                        summary = await self._caption_frames_with_fallback(
+                            event,
+                            source.local_path,
+                            first_seconds,
+                            ffmpeg_path,
+                            work,
+                        )
+                    return summary
+
+                await self._analyze_local_video_media(
+                    event,
+                    work,
+                    source.local_path,
+                    temp_dir,
+                    first_seconds,
+                    ffmpeg_path,
+                    visual_operation=caption_source,
+                )
+            elif source.has_stream_url:
                 work.visual_summary = await self._caption_url_with_fallback(
                     event, source.stream_url, work
                 )
-            if source.has_local_file:
-                work.local_video_path = source.local_path
-                if not work.visual_summary:
-                    work.visual_summary = await self._caption_frames_with_fallback(
-                        event, source.local_path, first_seconds, ffmpeg_path, work
-                    )
-                if self._stt_enabled():
-                    work.transcript = await self._transcribe_with_fallback(
-                        event, source.local_path, temp_dir, first_seconds, ffmpeg_path
-                    )
             return work
         finally:
             if source is not None:
                 source.cleanup()
+
+    async def _analyze_local_video_media(
+        self,
+        event: AstrMessageEvent,
+        work: MediaWork,
+        video_path: Path,
+        temp_dir: Path,
+        first_seconds: int,
+        ffmpeg_path: str,
+        *,
+        audio_source: Path | None = None,
+        enable_stt: bool = True,
+        visual_operation: Callable[[], Awaitable[str]] | None = None,
+    ) -> None:
+        async def caption_frames() -> str:
+            return await self._caption_frames_with_fallback(
+                event,
+                video_path,
+                first_seconds,
+                ffmpeg_path,
+                work,
+            )
+
+        caption = visual_operation or caption_frames
+        if not enable_stt or not self._stt_enabled():
+            work.visual_summary = await caption()
+            return
+
+        transcript_task = asyncio.create_task(
+            self._transcribe_with_fallback(
+                event,
+                audio_source or video_path,
+                temp_dir,
+                first_seconds,
+                ffmpeg_path,
+            )
+        )
+        started_at = asyncio.get_running_loop().time()
+        try:
+            work.visual_summary = await caption()
+        except BaseException:
+            transcript_task.cancel()
+            await asyncio.gather(transcript_task, return_exceptions=True)
+            raise
+
+        timeout_seconds = self._stt_timeout_seconds()
+        if timeout_seconds <= 0 or transcript_task.done():
+            work.transcript = await transcript_task
+            return
+
+        remaining = timeout_seconds - (asyncio.get_running_loop().time() - started_at)
+        if remaining > 0:
+            try:
+                work.transcript = await asyncio.wait_for(
+                    transcript_task,
+                    timeout=remaining,
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
+        else:
+            transcript_task.cancel()
+            await asyncio.gather(transcript_task, return_exceptions=True)
+
+        logger.warning(
+            "[video-chat] STT 已超过 %.1f 秒且视频转述已完成，放弃语音识别",
+            timeout_seconds,
+        )
 
     def _image_preprocess_options(self) -> tuple[bool, int, int]:
         enabled = bool(self.config.get("image_preprocess_enabled", False))
@@ -1211,3 +1298,6 @@ class VideoChatPlugin(Star):
 
     def _stt_enabled(self) -> bool:
         return bool(self.config.get("stt_enabled", False))
+
+    def _stt_timeout_seconds(self) -> float:
+        return max(0.0, float(self.config.get("stt_timeout_seconds", 60) or 0))
