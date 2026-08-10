@@ -644,19 +644,29 @@ class VideoChatPlugin(Star):
             return work
         work.local_video_path = video_path
 
-        audio_source = video_path
-        if not work.subtitle and self._stt_enabled() and media.audio_url:
-            downloaded_audio = temp_dir / "bili_audio.m4s"
-            try:
-                await download_media(
-                    media.audio_url,
-                    downloaded_audio,
-                    headers={"Referer": "https://www.bilibili.com/"},
-                    max_bytes=max_bytes,
-                )
-                audio_source = downloaded_audio
-            except Exception as exc:
-                logger.warning("[video-chat] B站音轨下载失败：%s", exc)
+        async def transcribe_bilibili_audio() -> str:
+            audio_source = video_path
+            if media.audio_url:
+                audio_source = temp_dir / "bili_audio.m4s"
+                try:
+                    await download_media(
+                        media.audio_url,
+                        audio_source,
+                        headers={"Referer": "https://www.bilibili.com/"},
+                        max_bytes=max_bytes,
+                    )
+                except Exception as exc:
+                    logger.warning("[video-chat] B站音轨下载失败：%s", exc)
+                    return ""
+            if not audio_source.exists():
+                return ""
+            return await self._transcribe_with_fallback(
+                event,
+                audio_source,
+                temp_dir,
+                first_seconds,
+                ffmpeg_path,
+            )
 
         await self._analyze_local_video_media(
             event,
@@ -665,8 +675,8 @@ class VideoChatPlugin(Star):
             temp_dir,
             first_seconds,
             ffmpeg_path,
-            audio_source=audio_source,
             enable_stt=not work.subtitle,
+            transcript_operation=transcribe_bilibili_audio,
         )
         return work
 
@@ -801,6 +811,7 @@ class VideoChatPlugin(Star):
         audio_source: Path | None = None,
         enable_stt: bool = True,
         visual_operation: Callable[[], Awaitable[str]] | None = None,
+        transcript_operation: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         async def caption_frames() -> str:
             return await self._caption_frames_with_fallback(
@@ -816,15 +827,17 @@ class VideoChatPlugin(Star):
             work.visual_summary = await caption()
             return
 
-        transcript_task = asyncio.create_task(
-            self._transcribe_with_fallback(
+        async def transcribe_audio() -> str:
+            return await self._transcribe_with_fallback(
                 event,
                 audio_source or video_path,
                 temp_dir,
                 first_seconds,
                 ffmpeg_path,
             )
-        )
+
+        transcript = transcript_operation or transcribe_audio
+        transcript_task = asyncio.create_task(transcript())
         started_at = asyncio.get_running_loop().time()
         try:
             work.visual_summary = await caption()
