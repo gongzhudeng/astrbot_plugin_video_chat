@@ -134,73 +134,121 @@ def _extract_aweme_ref(url: str) -> tuple[str | None, str | None]:
     return match.group(2), match.group(1)
 
 
+def _first_http_url(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value if value.startswith(("https://", "http://")) else None
+    if isinstance(value, list):
+        return next(
+            (url for entry in value if (url := _first_http_url(entry)) is not None),
+            None,
+        )
+    if not isinstance(value, dict):
+        return None
+
+    for key in (
+        "url_list",
+        "urlList",
+        "download_url_list",
+        "downloadUrlList",
+        "url",
+        "src",
+    ):
+        if url := _first_http_url(value.get(key)):
+            return url
+    return None
+
+
 def _extract_topics(item: dict[str, Any]) -> list[str]:
     topics: list[str] = []
-    for extra in item.get("text_extra") or []:
+    for extra in item.get("text_extra") or item.get("textExtra") or []:
         if not isinstance(extra, dict):
             continue
-        name = str(extra.get("hashtag_name", "") or "").strip()
+        name = str(extra.get("hashtag_name") or extra.get("hashtagName") or "").strip()
         if name:
             topics.append(f"#{name}")
     return list(dict.fromkeys(topics))
 
 
+def _format_published_at(value: Any) -> str:
+    try:
+        timestamp = int(str(value))
+        if timestamp > 10_000_000_000:
+            timestamp //= 1000
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
 def _build_result(item: dict[str, Any], aweme_id: str) -> DouyinResult:
-    title = str(item.get("desc", "") or "").strip()
-    author = item.get("author") or {}
-    published_at = ""
-    if item.get("create_time"):
-        published_at = datetime.fromtimestamp(int(item["create_time"])).strftime(
-            "%Y-%m-%d %H:%M"
-        )
+    title = str(item.get("desc") or item.get("description") or "").strip()
+    author = item.get("author") or item.get("authorInfo") or {}
+    if not isinstance(author, dict):
+        author = {}
+    author_unique_id = str(
+        author.get("unique_id") or author.get("uniqueId") or ""
+    ).strip()
+    author_uid = str(author.get("uid") or author.get("id") or "").strip()
     return DouyinResult(
         title=title,
         description=title,
         topics=_extract_topics(item),
-        author=str(author.get("nickname", "") or "").strip(),
+        author=str(author.get("nickname") or author.get("name") or "").strip(),
         author_id=(
-            f"抖音号 {author['unique_id']}"
-            if author.get("unique_id")
-            else f"UID {author['uid']}"
-            if author.get("uid")
+            f"抖音号 {author_unique_id}"
+            if author_unique_id
+            else f"UID {author_uid}"
+            if author_uid
             else ""
         ),
-        published_at=published_at,
+        published_at=_format_published_at(
+            item.get("create_time") or item.get("createTime")
+        ),
         aweme_id=aweme_id,
     )
 
 
 def _extract_image_urls(item: dict[str, Any]) -> list[str]:
-    images: list = item.get("images") or item.get("image_list") or []
+    images: list = (
+        item.get("images") or item.get("image_list") or item.get("imageList") or []
+    )
     image_urls: list[str] = []
     for image in images:
         if not isinstance(image, dict):
             continue
         candidates = [
             image.get("url_list"),
+            image.get("urlList"),
             image.get("download_url_list"),
-            image.get("animated_cover", {}).get("url_list")
-            if isinstance(image.get("animated_cover"), dict)
-            else None,
-            image.get("video", {}).get("play_addr", {}).get("url_list")
-            if isinstance(image.get("video"), dict)
-            else None,
+            image.get("downloadUrlList"),
+            image.get("animated_cover") or image.get("animatedCover"),
+            image.get("video"),
         ]
-        for urls in candidates:
-            if urls and isinstance(urls, list) and isinstance(urls[0], str):
-                image_urls.append(urls[0])
-                break
-    return image_urls
+        if url := next(
+            (url for candidate in candidates if (url := _first_http_url(candidate))),
+            None,
+        ):
+            image_urls.append(url)
+    return list(dict.fromkeys(image_urls))
 
 
 def _extract_play_url(item: dict[str, Any]) -> str | None:
-    video_obj = item.get("video")
+    video_obj = item.get("video") or item.get("videoInfo")
     if not isinstance(video_obj, dict):
         return None
-    url_list: list = video_obj.get("play_addr", {}).get("url_list", [])
-    if not url_list or not isinstance(url_list[0], str):
+    candidates = [
+        video_obj.get("play_addr"),
+        video_obj.get("playAddr"),
+        video_obj.get("play_url"),
+        video_obj.get("playUrl"),
+        video_obj.get("bit_rate") or video_obj.get("bitRate"),
+    ]
+    play_url = next(
+        (url for candidate in candidates if (url := _first_http_url(candidate))),
+        None,
+    )
+    if not play_url:
         return None
-    play_url = url_list[0].replace("playwm", "play")
+    play_url = play_url.replace("playwm", "play")
     lower_url = play_url.lower()
     if any(
         token in lower_url
@@ -215,6 +263,35 @@ def _extract_play_url(item: dict[str, Any]) -> str | None:
     ):
         return None
     return play_url
+
+
+def _looks_like_aweme_item(value: Any) -> bool:
+    return isinstance(value, dict) and bool(
+        _extract_play_url(value) or _extract_image_urls(value)
+    )
+
+
+def _find_aweme_items(payload: Any, *, maximum: int = 20) -> list[dict[str, Any]]:
+    """Find media-bearing work objects without depending on a page-specific path."""
+    found: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def visit(value: Any) -> None:
+        if len(found) >= maximum or not isinstance(value, (dict, list)):
+            return
+        marker = id(value)
+        if marker in seen:
+            return
+        seen.add(marker)
+        if _looks_like_aweme_item(value):
+            found.append(value)
+            return
+        children = value.values() if isinstance(value, dict) else value
+        for child in children:
+            visit(child)
+
+    visit(payload)
+    return found
 
 
 def _extract_from_router_data(
@@ -239,52 +316,56 @@ def _extract_from_router_data(
         logger.debug("[douyin] _ROUTER_DATA JSON 解析失败：%s", exc)
         return None
 
-    loader_data: dict = data.get("loaderData", {})
+    loader_data = data.get("loaderData", {})
+    if not isinstance(loader_data, dict):
+        logger.debug("[douyin] _ROUTER_DATA 缺少有效 loaderData")
+        return None
+
     page_types = [preferred_type] if preferred_type else []
     page_types.extend(
         page_type
         for page_type in ("video", "note", "slides")
         if page_type not in page_types
     )
+    pages = [
+        (f"{page_type}_(id)/page", loader_data.get(f"{page_type}_(id)/page"))
+        for page_type in page_types
+    ]
+    pages.extend(
+        (key, value)
+        for key, value in loader_data.items()
+        if key not in {page_key for page_key, _ in pages}
+    )
 
-    for page_type in page_types:
-        key_tmpl = f"{page_type}_(id)/page"
-        page = loader_data.get(key_tmpl)
-        if not isinstance(page, dict):
-            continue
-        item_list: list = page.get("videoInfoRes", {}).get("item_list", [])
-        if not item_list or not isinstance(item_list[0], dict):
-            continue
-        item = item_list[0]
-        result = _build_result(item, aweme_id)
-        image_urls = _extract_image_urls(item)
-        play_url = _extract_play_url(item)
+    for page_key, page in pages:
+        for item in _find_aweme_items(page):
+            result = _build_result(item, aweme_id)
+            image_urls = _extract_image_urls(item)
+            play_url = _extract_play_url(item)
 
-        if preferred_type in {"note", "slides"} and image_urls:
-            logger.info(
-                "[douyin] 图文/动图帖子，提取到 %d 个素材 (key=%s)",
-                len(image_urls),
-                key_tmpl,
-            )
-            result.image_urls = image_urls
-            return result
-
-        if play_url:
-            logger.info("[douyin] 从 _ROUTER_DATA[%s] 提取到 play_url", key_tmpl)
-            result.play_url = play_url
-            return result
-
-        if image_urls:
-            logger.info(
-                "[douyin] 图文/动图帖子，提取到 %d 个素材 (key=%s)",
-                len(image_urls),
-                key_tmpl,
-            )
-            result.image_urls = image_urls
-            return result
+            if preferred_type in {"note", "slides"} and image_urls:
+                logger.info(
+                    "[douyin] 图文/动图帖子，提取到 %d 个素材 (key=%s)",
+                    len(image_urls),
+                    page_key,
+                )
+                result.image_urls = image_urls
+                return result
+            if play_url:
+                logger.info("[douyin] 从 _ROUTER_DATA[%s] 提取到 play_url", page_key)
+                result.play_url = play_url
+                return result
+            if image_urls:
+                logger.info(
+                    "[douyin] 图文/动图帖子，提取到 %d 个素材 (key=%s)",
+                    len(image_urls),
+                    page_key,
+                )
+                result.image_urls = image_urls
+                return result
 
     logger.debug(
-        "[douyin] _ROUTER_DATA 中未找到 play_url 或图片，loaderData 键：%s",
+        "[douyin] _ROUTER_DATA 中未找到可识别作品，loaderData 键：%s",
         list(loader_data.keys())[:10],
     )
     return None

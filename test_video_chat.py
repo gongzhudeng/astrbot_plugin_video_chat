@@ -29,6 +29,7 @@ from core.douyin_resolver import (
     _request_signed_comments,
 )
 from core.douyin_signer import generate_a_bogus
+from core.video_resolver import _extract_info_sync
 from core.media_input import (
     VideoReference,
     cleanup_direct_video_cache,
@@ -1447,6 +1448,77 @@ class DouyinMediaTypeTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.play_url, "https://example.com/video.mp4")
         self.assertEqual(result.image_urls, [])
+
+    def test_new_nested_page_payload_supports_camel_case_media_fields(self) -> None:
+        item = {
+            "description": "新版页面的视频内容",
+            "authorInfo": {"name": "测试作者", "uniqueId": "author-id"},
+            "createTime": "1786536070",
+            "textExtra": [{"hashtagName": "测试"}],
+            "video": {"playAddr": {"urlList": ["https://example.com/video.mp4"]}},
+        }
+        payload = {
+            "loaderData": {
+                "video_(id)/page": {
+                    "payload": {"aweme_detail": item},
+                }
+            }
+        }
+        html = f"<script>window._ROUTER_DATA = {json.dumps(payload)}</script>"
+
+        result = _extract_from_router_data(
+            html,
+            "7664179859198843889",
+            preferred_type="video",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.play_url, "https://example.com/video.mp4")
+        self.assertEqual(result.title, "新版页面的视频内容")
+        self.assertEqual(result.author, "测试作者")
+        self.assertEqual(result.author_id, "抖音号 author-id")
+        self.assertEqual(result.topics, ["#测试"])
+
+
+class VideoResolverCookieRetryTests(unittest.TestCase):
+    def test_stale_cookie_error_retries_once_without_cookie_file(self) -> None:
+        calls: list[str | None] = []
+
+        class FakeYoutubeDL:
+            def __init__(self, options: dict) -> None:
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback) -> None:
+                return None
+
+            def extract_info(self, url: str, download: bool) -> dict:
+                cookiefile = self.options.get("cookiefile")
+                calls.append(cookiefile)
+                if cookiefile:
+                    raise RuntimeError(
+                        "Fresh cookies (not necessarily logged in) are needed"
+                    )
+                return {"title": "retry succeeds"}
+
+        fake_module = type("FakeYtDlp", (), {"YoutubeDL": FakeYoutubeDL})()
+        with (
+            patch.dict(sys.modules, {"yt_dlp": fake_module}),
+            patch(
+                "core.video_resolver._sanitize_cookies_file",
+                return_value="stale-cookies.txt",
+            ),
+        ):
+            result = _extract_info_sync(
+                "https://v.douyin.com/example/",
+                proxy=None,
+                cookies_file="stale-cookies.txt",
+            )
+
+        self.assertEqual(result, {"title": "retry succeeds"})
+        self.assertEqual(calls, ["stale-cookies.txt", None])
 
 
 class DouyinCommentClientTests(unittest.IsolatedAsyncioTestCase):

@@ -208,6 +208,13 @@ async def resolve_video_url(
 # ---------------------------------------------------------------------------
 
 
+def _should_retry_without_cookies(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    return "fresh cookies" in message or (
+        "cookies" in message and "not necessarily logged in" in message
+    )
+
+
 def _extract_info_sync(
     url: str, proxy: str | None, cookies_file: str | None
 ) -> dict | None:
@@ -219,15 +226,26 @@ def _extract_info_sync(
     sanitized: str | None = (
         _sanitize_cookies_file(cookies_file) if cookies_file else None
     )
-    try:
-        opts = _build_ydl_opts(
-            proxy=proxy, download=False, cookies_file=sanitized or cookies_file
-        )
+    effective_cookies = sanitized or cookies_file
+
+    def extract(cookiefile: str | None) -> dict | None:
+        opts = _build_ydl_opts(proxy=proxy, download=False, cookies_file=cookiefile)
         with yt_dlp.YoutubeDL(opts) as ydl:
-            try:
-                return ydl.extract_info(url, download=False)
-            except Exception as exc:
+            return ydl.extract_info(url, download=False)
+
+    try:
+        try:
+            return extract(effective_cookies)
+        except Exception as exc:
+            if not effective_cookies or not _should_retry_without_cookies(exc):
                 raise RuntimeError(f"yt-dlp 提取视频信息失败：{exc}") from exc
+            try:
+                return extract(None)
+            except Exception as retry_exc:
+                raise RuntimeError(
+                    "yt-dlp 提取视频信息失败（配置的 Cookies 已失效，"
+                    f"无 Cookies 重试仍失败）：{retry_exc}"
+                ) from retry_exc
     finally:
         if sanitized:
             try:
