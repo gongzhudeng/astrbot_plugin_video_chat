@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: E402, I001
 
 import asyncio
+import copy
 import io
 import json
 import os
@@ -262,6 +263,119 @@ class AutoVideoContextTests(unittest.IsolatedAsyncioTestCase):
                     refusal_keywords=plugin._visual_refusal_keywords(),
                     route="测试路径",
                 )
+
+    async def test_stale_request_refreshes_latest_video_history_and_keeps_decorations(
+        self,
+    ) -> None:
+        stale_history = [{"role": "user", "content": "较早的消息"}]
+        video_turn = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "看看这个视频"},
+                {"type": "text", "text": wrap_video_context("最新视频详情")},
+            ],
+        }
+        latest_history = stale_history + [
+            video_turn,
+            {"role": "assistant", "content": "我看到了"},
+        ]
+        stale_conversation = SimpleNamespace(
+            cid="conversation-id",
+            history=json.dumps(stale_history, ensure_ascii=False),
+        )
+        latest_conversation = SimpleNamespace(
+            cid="conversation-id",
+            history=json.dumps(latest_history, ensure_ascii=False),
+        )
+        manager = SimpleNamespace(
+            get_conversation=AsyncMock(return_value=latest_conversation),
+            update_conversation=AsyncMock(),
+        )
+        plugin = self._plugin({"max_video_context_details": 1})
+        plugin.context = SimpleNamespace(conversation_manager=manager)
+        event = _FakeVideoEvent(message_str="刚才那个视频呢")
+        persona_context = {"role": "assistant", "content": "人格开场"}
+        file_context = {"role": "system", "content": "文件提取结果"}
+        request = _FakeProviderRequest(
+            prompt="刚才那个视频呢",
+            contexts=[persona_context, *stale_history, file_context],
+            conversation=stale_conversation,
+        )
+
+        await plugin.inject_video_context(event, request)
+
+        self.assertIs(request.conversation, latest_conversation)
+        self.assertEqual(
+            request.contexts,
+            [persona_context, *latest_history, file_context],
+        )
+        self.assertEqual(len(list_video_contexts(request.contexts)), 1)
+        manager.update_conversation.assert_not_awaited()
+
+    async def test_refresh_failure_does_not_mutate_request(self) -> None:
+        stale_history = [{"role": "user", "content": "旧消息"}]
+        stale_conversation = SimpleNamespace(
+            cid="conversation-id",
+            history=json.dumps(stale_history, ensure_ascii=False),
+        )
+        event = _FakeVideoEvent(message_str="普通消息")
+
+        for latest_conversation in (
+            None,
+            SimpleNamespace(cid="conversation-id", history="not-json"),
+        ):
+            with self.subTest(latest_conversation=latest_conversation):
+                manager = SimpleNamespace(
+                    get_conversation=AsyncMock(return_value=latest_conversation),
+                    update_conversation=AsyncMock(),
+                )
+                plugin = self._plugin()
+                plugin.context = SimpleNamespace(conversation_manager=manager)
+                original_contexts = copy.deepcopy(stale_history)
+                request = _FakeProviderRequest(
+                    prompt="普通消息",
+                    contexts=copy.deepcopy(original_contexts),
+                    conversation=stale_conversation,
+                )
+
+                await plugin.inject_video_context(event, request)
+
+                self.assertIs(request.conversation, stale_conversation)
+                self.assertEqual(request.contexts, original_contexts)
+                manager.update_conversation.assert_not_awaited()
+
+    async def test_refresh_skips_custom_context_without_stale_snapshot(self) -> None:
+        stale_history = [{"role": "user", "content": "旧消息"}]
+        latest_history = stale_history + [
+            {"role": "assistant", "content": "较新的回复"}
+        ]
+        stale_conversation = SimpleNamespace(
+            cid="conversation-id",
+            history=json.dumps(stale_history, ensure_ascii=False),
+        )
+        latest_conversation = SimpleNamespace(
+            cid="conversation-id",
+            history=json.dumps(latest_history, ensure_ascii=False),
+        )
+        manager = SimpleNamespace(
+            get_conversation=AsyncMock(return_value=latest_conversation),
+            update_conversation=AsyncMock(),
+        )
+        plugin = self._plugin()
+        plugin.context = SimpleNamespace(conversation_manager=manager)
+        event = _FakeVideoEvent(message_str="普通消息")
+        custom_contexts = [{"role": "system", "content": "完全自定义上下文"}]
+        request = _FakeProviderRequest(
+            prompt="普通消息",
+            contexts=copy.deepcopy(custom_contexts),
+            conversation=stale_conversation,
+        )
+
+        await plugin.inject_video_context(event, request)
+
+        self.assertIs(request.conversation, stale_conversation)
+        self.assertEqual(request.contexts, custom_contexts)
+        manager.update_conversation.assert_not_awaited()
 
     async def test_temporary_mode_uses_video_only_for_current_request(self) -> None:
         old = {

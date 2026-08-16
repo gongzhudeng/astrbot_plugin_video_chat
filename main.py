@@ -89,7 +89,7 @@ class AnalysisOptions:
     "灵犀 · 视频理解",
     "灵犀",
     "自动理解直发视频与抖音/B站链接，并限制历史中的完整视频解析数量",
-    "2.9.0",
+    "2.10.1",
     "https://github.com/gongzhudeng/astrbot_plugin_video_chat",
 )
 class VideoChatPlugin(Star):
@@ -130,6 +130,8 @@ class VideoChatPlugin(Star):
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
+        await self._refresh_request_conversation(event, req)
+
         if not self._llm_tool_enabled() and req.func_tool:
             req.func_tool.remove_tool("analyze_video")
 
@@ -533,6 +535,103 @@ class VideoChatPlugin(Star):
 
     def _video_context_limit(self) -> int:
         return max(0, int(self.config.get("max_video_context_details", 3) or 0))
+
+    async def _refresh_request_conversation(
+        self,
+        event: AstrMessageEvent,
+        req: ProviderRequest,
+    ) -> None:
+        conversation = getattr(req, "conversation", None)
+        manager = getattr(getattr(self, "context", None), "conversation_manager", None)
+        conversation_id = getattr(conversation, "cid", None)
+        get_conversation = getattr(manager, "get_conversation", None)
+        if not conversation_id or not callable(get_conversation):
+            return
+
+        try:
+            latest_conversation = await get_conversation(
+                event.unified_msg_origin,
+                conversation_id,
+            )
+        except Exception as exc:
+            logger.warning("[video-chat] 获取最新会话历史失败：%s", exc)
+            return
+        if latest_conversation is None:
+            logger.warning(
+                "[video-chat] 无法刷新会话历史：cid=%s 不存在",
+                conversation_id,
+            )
+            return
+
+        try:
+            stale_history = json.loads(getattr(conversation, "history", "[]") or "[]")
+            latest_history = json.loads(
+                getattr(latest_conversation, "history", "[]") or "[]"
+            )
+        except (TypeError, ValueError) as exc:
+            logger.warning("[video-chat] 无法解析待刷新的会话历史：%s", exc)
+            return
+        if not isinstance(stale_history, list) or not isinstance(latest_history, list):
+            logger.warning("[video-chat] 无法刷新会话历史：历史记录不是列表")
+            return
+
+        request_contexts = getattr(req, "contexts", None)
+        if not isinstance(request_contexts, list):
+            logger.warning("[video-chat] 无法刷新会话历史：请求上下文不是列表")
+            return
+        if stale_history == latest_history:
+            req.conversation = latest_conversation
+            return
+
+        rebased_contexts = self._replace_history_snapshot(
+            request_contexts,
+            stale_history,
+            latest_history,
+        )
+        if rebased_contexts is None:
+            logger.warning(
+                "[video-chat] 跳过旧会话快照刷新：cid=%s 无法唯一定位历史片段",
+                conversation_id,
+            )
+            return
+
+        req.contexts = rebased_contexts
+        req.conversation = latest_conversation
+        logger.info(
+            "[video-chat] 已刷新排队请求的会话历史：cid=%s old=%d latest=%d "
+            "video_contexts=%d",
+            conversation_id,
+            len(stale_history),
+            len(latest_history),
+            len(list_video_contexts(latest_history)),
+        )
+
+    @staticmethod
+    def _replace_history_snapshot(
+        request_contexts: list,
+        stale_history: list,
+        latest_history: list,
+    ) -> list | None:
+        if request_contexts == stale_history:
+            return copy.deepcopy(latest_history)
+        if not stale_history:
+            return None
+
+        stale_length = len(stale_history)
+        matches = [
+            index
+            for index in range(len(request_contexts) - stale_length + 1)
+            if request_contexts[index : index + stale_length] == stale_history
+        ]
+        if len(matches) != 1:
+            return None
+
+        start = matches[0]
+        return (
+            request_contexts[:start]
+            + copy.deepcopy(latest_history)
+            + request_contexts[start + stale_length :]
+        )
 
     def _prune_request_video_contexts(
         self,
